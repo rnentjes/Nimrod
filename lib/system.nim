@@ -47,6 +47,8 @@ const
 
 {.push hints: off.}
 
+const InSystemModule = true
+
 type
   Ordinal* {.magic: Ordinal.}[T]
   `nil` {.magic: "Nil".}
