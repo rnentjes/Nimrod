@@ -385,6 +385,11 @@ static N_INLINE(NI32, float32ToInt32)(float x) {
 #define zeroMem(a, size) memset(a, 0, size)
 #define equalMem(a, b, size) (memcmp(a, b, size) == 0)
 
+#ifdef ARDUINO
+#include <avr/pgmspace.h>
+#define STRING_LITERAL(name, str, length) \
+  name = PSTR(str)
+#else
 #define STRING_LITERAL(name, str, length) \
   static const struct {                   \
     TGenericSeq Sup;                      \
@@ -392,6 +397,7 @@ static N_INLINE(NI32, float32ToInt32)(float x) {
   } name = {{length, length}, str}
 
 typedef struct TStringDesc* string;
+#endif
 
 /* declared size of a sequence: */
 #if defined(__GNUC__)
