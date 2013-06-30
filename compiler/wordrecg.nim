@@ -41,7 +41,7 @@ type
     
     wImmediate, wDestructor, wImportCpp, wImportObjC,
     wImportCompilerProc,
-    wImportc, wExportc, wIncompleteStruct,
+    wImportc, wExportc, wIncompleteStruct, wRequiresInit,
     wAlign, wNodecl, wPure, wSideeffect, wHeader,
     wNosideeffect, wNoreturn, wMerge, wLib, wDynlib, wCompilerproc, wProcVar, 
     wFatal, wError, wWarning, wHint, wLine, wPush, wPop, wDefine, wUndef, 
@@ -62,7 +62,7 @@ type
     wAcyclic, wShallow, wUnroll, wLinearScanEnd,
     wWrite, wGensym, wInject, wDirty, wInheritable, wThreadVar, wEmit, 
     wNoStackFrame,
-    wImplicitStatic, wGlobal, wHoist,
+    wImplicitStatic, wGlobal, wCodegenDecl,
 
     wAuto, wBool, wCatch, wChar, wClass,
     wConst_cast, wDefault, wDelete, wDouble, wDynamic_cast,
@@ -122,7 +122,7 @@ const
     
     "immediate", "destructor", "importcpp", "importobjc",
     "importcompilerproc", "importc", "exportc", "incompletestruct",
-    "align", "nodecl", "pure", "sideeffect",
+    "requiresinit", "align", "nodecl", "pure", "sideeffect",
     "header", "nosideeffect", "noreturn", "merge", "lib", "dynlib", 
     "compilerproc", "procvar", "fatal", "error", "warning", "hint", "line", 
     "push", "pop", "define", "undef", "linedir", "stacktrace", "linetrace", 
@@ -142,7 +142,7 @@ const
     "watchpoint",
     "subschar", "acyclic", "shallow", "unroll", "linearscanend",
     "write", "gensym", "inject", "dirty", "inheritable", "threadvar", "emit",
-    "nostackframe", "implicitstatic", "global", "hoist",
+    "nostackframe", "implicitstatic", "global", "codegendecl",
     
     "auto", "bool", "catch", "char", "class",
     "const_cast", "default", "delete", "double",

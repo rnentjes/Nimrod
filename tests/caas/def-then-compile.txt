@@ -1,7 +1,8 @@
 main.nim
-> idetools --track:main.nim,5,18 --def main.nim
+> idetools --track:$TESTNIM,5,18 --def --verbosity:0 --hints:on
 strutils.toUpper
-SuccessX
-> c
+! SuccessX
+
+> c --verbosity:0 --hints:on
 SuccessX
 

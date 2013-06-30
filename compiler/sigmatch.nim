@@ -47,6 +47,9 @@ type
     isGeneric,
     isFromIntLit,            # conversion *from* int literal; proven safe
     isEqual
+  
+const
+  isNilConversion = isConvertible # maybe 'isIntConv' fits better?
     
 proc markUsed*(n: PNode, s: PSym)
 
@@ -163,6 +166,15 @@ proc writeMatches*(c: TCandidate) =
   Writeln(stdout, "intconv matches: " & $c.intConvMatches)
   Writeln(stdout, "generic matches: " & $c.genericMatches)
 
+proc argTypeToString(arg: PNode): string =
+  if arg.kind in nkSymChoices:
+    result = typeToString(arg[0].typ)
+    for i in 1 .. <arg.len:
+      result.add(" | ")
+      result.add typeToString(arg[i].typ)
+  else:
+    result = arg.typ.typeToString
+
 proc NotFoundError*(c: PContext, n: PNode) =
   # Gives a detailed error message; this is separated from semOverloadedCall,
   # as semOverlodedCall is already pretty slow (and we need this information
@@ -172,20 +184,20 @@ proc NotFoundError*(c: PContext, n: PNode) =
     GlobalError(n.info, errTypeMismatch, "")
   var result = msgKindToString(errTypeMismatch)
   for i in countup(1, sonsLen(n) - 1):
-    var nt = n.sons[i].typ
+    var arg = n.sons[i]
     if n.sons[i].kind == nkExprEqExpr: 
       add(result, renderTree(n.sons[i].sons[0]))
       add(result, ": ")
-      if nt.isNil:
-        n.sons[i].sons[1] = c.semOperand(c, n.sons[i].sons[1])
-        nt = n.sons[i].sons[1].typ
-        n.sons[i].typ = nt
+      if arg.typ.isNil:
+        arg = c.semOperand(c, n.sons[i].sons[1])
+        n.sons[i].typ = arg.typ
+        n.sons[i].sons[1] = arg
     else:
-      if nt.isNil:
-        n.sons[i] = c.semOperand(c, n.sons[i])
-        nt = n.sons[i].typ
-    if nt.kind == tyError: return
-    add(result, typeToString(nt))
+      if arg.typ.isNil:
+        arg = c.semOperand(c, n.sons[i])
+        n.sons[i] = arg
+    if arg.typ.kind == tyError: return
+    add(result, argTypeToString(arg))
     if i != sonsLen(n) - 1: add(result, ", ")
   add(result, ')')
   var candidates = ""
@@ -196,7 +208,7 @@ proc NotFoundError*(c: PContext, n: PNode) =
       add(candidates, getProcHeader(sym))
       add(candidates, "\n")
     sym = nextOverloadIter(o, c, n.sons[0])
-  if candidates != "": 
+  if candidates != "":
     add(result, "\n" & msgKindToString(errButExpected) & "\n" & candidates)
   LocalError(n.Info, errGenerated, result)
   
@@ -471,6 +483,8 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
       else:
         result = typeRel(c, f.sons[0], a.sons[0])
         if result < isGeneric: result = isNone
+        elif tfNotNil in f.flags and tfNotNil notin a.flags:
+          result = isNilConversion
     of tyNil: result = f.allowsNil
     else: nil
   of tyOrdinal:
@@ -506,6 +520,8 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
     of tyPtr: 
       result = typeRel(c, base(f), base(a))
       if result <= isConvertible: result = isNone
+      elif tfNotNil in f.flags and tfNotNil notin a.flags:
+        result = isNilConversion
     of tyNil: result = f.allowsNil
     else: nil
   of tyRef: 
@@ -513,13 +529,21 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
     of tyRef:
       result = typeRel(c, base(f), base(a))
       if result <= isConvertible: result = isNone
+      elif tfNotNil in f.flags and tfNotNil notin a.flags:
+        result = isNilConversion
     of tyNil: result = f.allowsNil
     else: nil
   of tyProc:
     result = procTypeRel(c, f, a)
-  of tyPointer: 
+    if result != isNone and tfNotNil in f.flags and tfNotNil notin a.flags:
+      result = isNilConversion
+  of tyPointer:
     case a.kind
-    of tyPointer: result = isEqual
+    of tyPointer:
+      if tfNotNil in f.flags and tfNotNil notin a.flags:
+        result = isNilConversion
+      else:
+        result = isEqual
     of tyNil: result = f.allowsNil
     of tyProc:
       if a.callConv != ccClosure: result = isConvertible
@@ -527,13 +551,21 @@ proc typeRel(c: var TCandidate, f, a: PType): TTypeRelation =
     else: nil
   of tyString: 
     case a.kind
-    of tyString: result = isEqual
+    of tyString: 
+      if tfNotNil in f.flags and tfNotNil notin a.flags:
+        result = isNilConversion
+      else:
+        result = isEqual
     of tyNil: result = f.allowsNil
     else: nil
   of tyCString:
     # conversion from string to cstring is automatic:
     case a.Kind
-    of tyCString: result = isEqual
+    of tyCString:
+      if tfNotNil in f.flags and tfNotNil notin a.flags:
+        result = isNilConversion
+      else:
+        result = isEqual
     of tyNil: result = f.allowsNil
     of tyString: result = isConvertible
     of tyPtr:
@@ -851,6 +883,20 @@ proc prepareNamedParam(a: PNode) =
     var info = a.sons[0].info
     a.sons[0] = newIdentNode(considerAcc(a.sons[0]), info)
 
+proc arrayConstr(c: PContext, n: PNode): PType =
+  result = newTypeS(tyArrayConstr, c)
+  rawAddSon(result, makeRangeType(c, 0, 0, n.info))
+  addSonSkipIntLit(result, skipTypes(n.typ, {tyGenericInst, tyVar, tyOrdinal}))
+
+proc arrayConstr(c: PContext, info: TLineInfo): PType =
+  result = newTypeS(tyArrayConstr, c)
+  rawAddSon(result, makeRangeType(c, 0, -1, info))
+  rawAddSon(result, newTypeS(tyEmpty, c)) # needs an empty basetype!
+
+proc incrIndexType(t: PType) =
+  assert t.kind == tyArrayConstr
+  inc t.sons[0].n.sons[1].intVal
+
 proc matchesAux(c: PContext, n, nOrig: PNode,
                 m: var TCandidate, marker: var TIntSet) = 
   template checkConstraint(n: expr) {.immediate, dirty.} =
@@ -901,7 +947,7 @@ proc matchesAux(c: PContext, n, nOrig: PNode,
       checkConstraint(n.sons[a].sons[1])
       if m.baseTypeMatch: 
         assert(container == nil)
-        container = newNodeI(nkBracket, n.sons[a].info)
+        container = newNodeIT(nkBracket, n.sons[a].info, arrayConstr(c, arg))
         addSon(container, arg)
         setSon(m.call, formal.position + 1, container)
         if f != formalLen - 1: container = nil
@@ -927,6 +973,7 @@ proc matchesAux(c: PContext, n, nOrig: PNode,
                                     n.sons[a], nOrig.sons[a])
           if (arg != nil) and m.baseTypeMatch and (container != nil):
             addSon(container, arg)
+            incrIndexType(container.typ)
           else:
             m.state = csNoMatch
             return
@@ -952,7 +999,7 @@ proc matchesAux(c: PContext, n, nOrig: PNode,
           return
         if m.baseTypeMatch:
           assert(container == nil)
-          container = newNodeI(nkBracket, n.sons[a].info)
+          container = newNodeIT(nkBracket, n.sons[a].info, arrayConstr(c, arg))
           addSon(container, arg)
           setSon(m.call, formal.position + 1, 
                  implicitConv(nkHiddenStdConv, formal.typ, container, m, c))
@@ -985,7 +1032,7 @@ proc matches*(c: PContext, n, nOrig: PNode, m: var TCandidate) =
     if not ContainsOrIncl(marker, formal.position): 
       if formal.ast == nil:
         if formal.typ.kind == tyVarargs:
-          var container = newNodeI(nkBracket, n.info)
+          var container = newNodeIT(nkBracket, n.info, arrayConstr(c, n.info))
           addSon(m.call, implicitConv(nkHiddenStdConv, formal.typ,
                                       container, m, c))
         else:

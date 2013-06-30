@@ -590,7 +590,7 @@ proc evalAtCompileTime(c: PContext, n: PNode): PNode =
       call.add(a)
     #echo "NOW evaluating at compile time: ", call.renderTree
     if sfCompileTime in callee.flags:
-      result = evalStaticExpr(c.module, call)
+      result = evalStaticExpr(c.module, call, c.p.owner)
       if result.isNil: 
         LocalError(n.info, errCannotInterpretNodeX, renderTree(call))
     else:
@@ -601,9 +601,10 @@ proc evalAtCompileTime(c: PContext, n: PNode): PNode =
 
 proc semStaticExpr(c: PContext, n: PNode): PNode =
   let a = semExpr(c, n.sons[0])
-  result = evalStaticExpr(c.module, a)
+  result = evalStaticExpr(c.module, a, c.p.owner)
   if result.isNil:
     LocalError(n.info, errCannotInterpretNodeX, renderTree(n))
+    result = emptyNode
 
 proc semOverloadedCallAnalyseEffects(c: PContext, n: PNode, nOrig: PNode,
                                      flags: TExprFlags): PNode =
@@ -1290,6 +1291,7 @@ proc newAnonSym(kind: TSymKind, info: TLineInfo,
 proc semExpandToAst(c: PContext, n: PNode): PNode =
   var macroCall = n[1]
   var expandedSym = expectMacroOrTemplateCall(c, macroCall)
+  if expandedSym.kind == skError: return n
 
   macroCall.sons[0] = newSymNode(expandedSym, macroCall.info)
   markUsed(n, expandedSym)
@@ -1601,6 +1603,25 @@ proc semTuplePositionsConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
     addSonSkipIntLit(typ, n.sons[i].typ)
   result.typ = typ
 
+proc checkInitialized(n: PNode, ids: TIntSet, info: TLineInfo) =
+  case n.kind
+  of nkRecList:
+    for i in countup(0, sonsLen(n) - 1):
+      checkInitialized(n.sons[i], ids, info)
+  of nkRecCase:
+    if (n.sons[0].kind != nkSym): InternalError(info, "checkInitialized")
+    checkInitialized(n.sons[0], ids, info)
+    when false:
+      # XXX we cannot check here, as we don't know the branch!
+      for i in countup(1, sonsLen(n) - 1):
+        case n.sons[i].kind
+        of nkOfBranch, nkElse: checkInitialized(lastSon(n.sons[i]), ids, info)
+        else: internalError(info, "checkInitialized")
+  of nkSym:
+    if tfNeedsInit in n.sym.typ.flags and n.sym.name.id notin ids:
+      Message(info, errGenerated, "field not initialized: " & n.sym.name.s)
+  else: internalError(info, "checkInitialized")
+
 proc semObjConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
   var t = semTypeNode(c, n.sons[0], nil)
   result = n
@@ -1611,6 +1632,7 @@ proc semObjConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
   if t.kind != tyObject:
     localError(n.info, errGenerated, "object constructor needs an object type")
     return
+  var objType = t
   var ids = initIntSet()
   for i in 1.. <n.len:
     let it = n.sons[i]
@@ -1637,11 +1659,18 @@ proc semObjConstr(c: PContext, n: PNode, flags: TExprFlags): PNode =
       e = fitNode(c, f.typ, e)
       # small hack here in a nkObjConstr the ``nkExprColonExpr`` node can have
       # 3 childen the last being the field check
-      if check != nil: it.add(check)
+      if check != nil:
+        check.sons[0] = it.sons[0]
+        it.add(check)
     else:
       localError(it.info, errUndeclaredFieldX, id.s)
     it.sons[1] = e
     # XXX object field name check for 'case objects' if the kind is static?
+  if tfNeedsInit in objType.flags:
+    while true:
+      checkInitialized(objType.n, ids, n.info)
+      if objType.sons[0] == nil: break
+      objType = skipTypes(objType.sons[0], {tyGenericInst})
 
 proc semBlock(c: PContext, n: PNode): PNode =
   result = n

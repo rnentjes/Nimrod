@@ -146,7 +146,9 @@ proc discardCheck(result: PNode) =
       if result.typ.kind == tyNil:
         fixNilType(result)
       else:
-        localError(result.info, errDiscardValue)
+        var n = result
+        while n.kind in skipForDiscardable: n = n.lastSon
+        localError(n.info, errDiscardValue)
 
 proc semIf(c: PContext, n: PNode): PNode = 
   result = n
@@ -188,7 +190,7 @@ proc semCase(c: PContext, n: PNode): PNode =
   var typ = CommonTypeBegin
   var hasElse = false
   case skipTypes(n.sons[0].Typ, abstractVarRange-{tyTypeDesc}).Kind
-  of tyInt..tyInt64, tyChar, tyEnum:
+  of tyInt..tyInt64, tyChar, tyEnum, tyUInt..tyUInt32:
     chckCovered = true
   of tyFloat..tyFloat128, tyString, tyError:
     nil
@@ -313,6 +315,13 @@ proc semIdentDef(c: PContext, n: PNode, kind: TSymKind): PSym =
     result = semIdentWithPragma(c, kind, n, {})
   suggestSym(n, result)
 
+proc checkNilable(v: PSym) =
+  if sfGlobal in v.flags and {tfNotNil, tfNeedsInit} * v.typ.flags != {}:
+    if v.ast.isNil:
+      Message(v.info, warnProveInit, v.name.s)
+    elif tfNotNil in v.typ.flags and tfNotNil notin v.ast.typ.flags:
+      Message(v.info, warnProveInit, v.name.s)
+
 proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode = 
   var b: PNode
   result = copyNode(n)
@@ -371,11 +380,11 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
             # side of the '=':
             if warnShadowIdent in gNotes and not identWithin(def, v.name):
               Message(a.info, warnShadowIdent, v.name.s)
-      if def != nil and def.kind != nkEmpty:
-        # this is only needed for the evaluation pass:
-        v.ast = def
-        if sfThread in v.flags: LocalError(def.info, errThreadvarCannotInit)
       if a.kind != nkVarTuple:
+        if def != nil and def.kind != nkEmpty:
+          # this is needed for the evaluation pass and for the guard checking:
+          v.ast = def
+          if sfThread in v.flags: LocalError(def.info, errThreadvarCannotInit)
         v.typ = typ
         b = newNodeI(nkIdentDefs, a.info)
         if importantComments():
@@ -385,9 +394,11 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
         addSon(b, a.sons[length-2])      # keep type desc for doc generator
         addSon(b, copyTree(def))
         addSon(result, b)
-      else: 
+      else:
+        if def.kind == nkPar: v.ast = def[j]
         v.typ = tup.sons[j]
         b.sons[j] = newSymNode(v)
+      checkNilable(v)
     
 proc semConst(c: PContext, n: PNode): PNode = 
   result = copyNode(n)
@@ -1128,9 +1139,10 @@ proc semPragmaBlock(c: PContext, n: PNode): PNode =
 
 proc semStaticStmt(c: PContext, n: PNode): PNode =
   let a = semStmt(c, n.sons[0])
-  result = evalStaticExpr(c.module, a)
+  result = evalStaticExpr(c.module, a, c.p.owner)
   if result.isNil:
     LocalError(n.info, errCannotInterpretNodeX, renderTree(n))
+    result = emptyNode
   elif result.kind == nkEmpty:
     result = newNodeI(nkDiscardStmt, n.info, 1)
     result.sons[0] = emptyNode

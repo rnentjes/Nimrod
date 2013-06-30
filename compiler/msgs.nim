@@ -106,11 +106,13 @@ type
     warnUnknownSubstitutionX, warnLanguageXNotSupported, warnCommentXIgnored, 
     warnNilStatement, warnAnalysisLoophole,
     warnDifferentHeaps, warnWriteToForeignHeap, warnImplicitClosure,
-    warnEachIdentIsTuple, warnShadowIdent, warnUser,
-    hintSuccess, hintSuccessX, 
-    hintLineTooLong, hintXDeclaredButNotUsed, hintConvToBaseNotNeeded, 
-    hintConvFromXtoItselfNotNeeded, hintExprAlwaysX, hintQuitCalled, 
-    hintProcessing, hintCodeBegin, hintCodeEnd, hintConf, hintPath, 
+    warnEachIdentIsTuple, warnShadowIdent, 
+    warnProveInit, warnProveField, warnProveIndex,
+    warnUninit, warnUser,
+    hintSuccess, hintSuccessX,
+    hintLineTooLong, hintXDeclaredButNotUsed, hintConvToBaseNotNeeded,
+    hintConvFromXtoItselfNotNeeded, hintExprAlwaysX, hintQuitCalled,
+    hintProcessing, hintCodeBegin, hintCodeEnd, hintConf, hintPath,
     hintConditionAlwaysTrue, hintPattern,
     hintUser
 
@@ -355,6 +357,10 @@ const
     warnImplicitClosure: "implicit closure convention: '$1' [ImplicitClosure]",
     warnEachIdentIsTuple: "each identifier is a tuple [EachIdentIsTuple]",
     warnShadowIdent: "shadowed identifier: '$1' [ShadowIdent]",
+    warnProveInit: "Cannot prove that '$1' is initialized. This will become a compile time error in the future. [ProveInit]",
+    warnProveField: "cannot prove that field '$1' is accessible [ProveField]",
+    warnProveIndex: "cannot prove index '$1' is valid [ProveIndex]",
+    warnUninit: "'$1' might not have been initialized [Uninit]",
     warnUser: "$1 [User]", 
     hintSuccess: "operation successful [Success]", 
     hintSuccessX: "operation successful ($# lines compiled; $# sec total; $#) [SuccessX]", 
@@ -374,14 +380,15 @@ const
     hintUser: "$1 [User]"]
 
 const
-  WarningsToStr*: array[0..19, string] = ["CannotOpenFile", "OctalEscape", 
+  WarningsToStr*: array[0..23, string] = ["CannotOpenFile", "OctalEscape", 
     "XIsNeverRead", "XmightNotBeenInit",
     "Deprecated", "ConfigDeprecated",
     "SmallLshouldNotBeUsed", "UnknownMagic", 
     "RedefinitionOfLabel", "UnknownSubstitutionX", "LanguageXNotSupported", 
     "CommentXIgnored", "NilStmt",
     "AnalysisLoophole", "DifferentHeaps", "WriteToForeignHeap",
-    "ImplicitClosure", "EachIdentIsTuple", "ShadowIdent", "User"]
+    "ImplicitClosure", "EachIdentIsTuple", "ShadowIdent", 
+    "ProveInit", "ProveField", "ProveIndex", "Uninit", "User"]
 
   HintsToStr*: array[0..15, string] = ["Success", "SuccessX", "LineTooLong", 
     "XDeclaredButNotUsed", "ConvToBaseNotNeeded", "ConvFromXtoItselfNotNeeded", 
@@ -512,7 +519,9 @@ proc raiseRecoverableError*(msg: string) {.noinline, noreturn.} =
 proc sourceLine*(i: TLineInfo): PRope
 
 var
-  gNotes*: TNoteKinds = {low(TNoteKind)..high(TNoteKind)} - {warnShadowIdent}
+  gNotes*: TNoteKinds = {low(TNoteKind)..high(TNoteKind)} - 
+                        {warnShadowIdent, warnUninit,
+                         warnProveField, warnProveIndex}
   gErrorCounter*: int = 0     # counts the number of errors
   gHintCounter*: int = 0
   gWarnCounter*: int = 0
@@ -789,11 +798,12 @@ proc addSourceLine*(fileIdx: int32, line: string) =
 proc sourceLine*(i: TLineInfo): PRope =
   if i.fileIndex < 0: return nil
   
-  if not optPreserveOrigSource and
-         fileInfos[i.fileIndex].lines.len == 0:
-    for line in lines(i.toFullPath):
-      addSourceLine i.fileIndex, line.string
-
+  if not optPreserveOrigSource and fileInfos[i.fileIndex].lines.len == 0:
+    try:
+      for line in lines(i.toFullPath):
+        addSourceLine i.fileIndex, line.string
+    except EIO:
+      discard
   InternalAssert i.fileIndex < fileInfos.len
   # can happen if the error points to EOF:
   if i.line > fileInfos[i.fileIndex].lines.len: return nil

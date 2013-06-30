@@ -77,7 +77,7 @@ type
     of pkChar, pkGreedyRepChar: ch: char
     of pkCharChoice, pkGreedyRepSet: charChoice: ref set[char]
     of pkNonTerminal: nt: PNonTerminal
-    of pkBackRef..pkBackRefIgnoreStyle: index: range[1..MaxSubpatterns]
+    of pkBackRef..pkBackRefIgnoreStyle: index: range[0..MaxSubpatterns]
     else: sons: seq[TNode]
   PNonTerminal* = ref TNonTerminal
   
@@ -1733,12 +1733,14 @@ when isMainModule:
     doAssert matches[0] == "a"
   else:
     doAssert false
-    
-  if match("abcdefg", peg"c {d} ef {g}", matches, 2): 
-    doAssert matches[0] == "d"
-    doAssert matches[1] == "g"
-  else:
-    doAssert false
+  
+  block:
+    var matches: array[0..2, string]
+    if match("abcdefg", peg"c {d} ef {g}", matches, 2): 
+      doAssert matches[0] == "d"
+      doAssert matches[1] == "g"
+    else:
+      doAssert false
 
   for x in findAll("abcdef", peg"{.}", 3):
     echo x

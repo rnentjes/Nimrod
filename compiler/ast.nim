@@ -278,10 +278,11 @@ const
     # the compiler will avoid printing such names 
     # in user messages.
       
-  sfHoist* = sfVolatile ## proc return value can be hoisted
-
   sfNoForward* = sfRegister
     # forward declarations are not required (per module)
+
+  sfNoRoot* = sfBorrow # a local variable is provably no root so it doesn't
+                       # require RC ops
 
 const
   # getting ready for the future expr/stmt merge
@@ -353,7 +354,7 @@ type
     nfSem       # node has been checked for semantics
 
   TNodeFlags* = set[TNodeFlag]
-  TTypeFlag* = enum   # keep below 32 for efficiency reasons (now: 19)
+  TTypeFlag* = enum   # keep below 32 for efficiency reasons (now: 23)
     tfVarargs,        # procedure has C styled varargs
     tfNoSideEffect,   # procedure type does not allow side effects
     tfFinal,          # is the object final?
@@ -380,7 +381,13 @@ type
     tfByRef,          # pass object/tuple by reference (C backend)
     tfIterator,       # type is really an iterator, not a tyProc
     tfShared,         # type is 'shared'
-    tfNotNil          # type cannot be 'nil'
+    tfNotNil,         # type cannot be 'nil'
+    
+    tfNeedsInit,      # type constains a "not nil" constraint somewhere or some
+                      # other type so that it requires inititalization
+    tfHasShared,      # type constains a "shared" constraint modifier somewhere
+    tfHasMeta,        # type has "typedesc" or "expr" somewhere
+    tfHasGCedMem,     # type contains GC'ed memory
 
   TTypeFlags* = set[TTypeFlag]
 
@@ -659,12 +666,15 @@ type
                               # (or not in symbol table)
                               # for modules, an unique index corresponding
                               # to the module's fileIdx
+                              # for variables a slot index for the evaluator
 
     offset*: int              # offset of record field
     loc*: TLoc
     annex*: PLib              # additional fields (seldom used, so we use a
                               # reference to another object to safe space)
-    constraint*: PNode        # additional constraints like 'lit|result'
+    constraint*: PNode        # additional constraints like 'lit|result'; also
+                              # misused for the codegenDecl pragma in the hope
+                              # it won't cause problems
   
   TTypeSeq* = seq[PType]
   TType* {.acyclic.} = object of TIdObj # \
@@ -920,7 +930,10 @@ proc discardSons(father: PNode) =
   father.sons = nil
 
 when defined(useNodeIds):
-  const nodeIdToDebug = 140600
+  const nodeIdToDebug = 612777 # 612794
+  #612840 # 612905 # 614635 # 614637 # 614641
+  # 423408
+  #429107 # 430443 # 441048 # 441090 # 441153
   var gNodeId: int
 
 proc newNode(kind: TNodeKind): PNode = 
@@ -933,6 +946,7 @@ proc newNode(kind: TNodeKind): PNode =
   when defined(useNodeIds):
     result.id = gNodeId
     if result.id == nodeIdToDebug:
+      echo "KIND ", result.kind
       writeStackTrace()
     inc gNodeId
 
@@ -973,6 +987,12 @@ proc newNodeI(kind: TNodeKind, info: TLineInfo): PNode =
   new(result)
   result.kind = kind
   result.info = info
+  when defined(useNodeIds):
+    result.id = gNodeId
+    if result.id == nodeIdToDebug:
+      echo "KIND ", result.kind
+      writeStackTrace()
+    inc gNodeId
 
 proc newNodeI*(kind: TNodeKind, info: TLineInfo, children: int): PNode =
   new(result)
@@ -980,6 +1000,12 @@ proc newNodeI*(kind: TNodeKind, info: TLineInfo, children: int): PNode =
   result.info = info
   if children > 0:
     newSeq(result.sons, children)
+  when defined(useNodeIds):
+    result.id = gNodeId
+    if result.id == nodeIdToDebug:
+      echo "KIND ", result.kind
+      writeStackTrace()
+    inc gNodeId
 
 proc newNode*(kind: TNodeKind, info: TLineInfo, sons: TNodeSeq = @[],
              typ: PType = nil): PNode =
@@ -989,6 +1015,12 @@ proc newNode*(kind: TNodeKind, info: TLineInfo, sons: TNodeSeq = @[],
   result.typ = typ
   # XXX use shallowCopy here for ownership transfer:
   result.sons = sons
+  when defined(useNodeIds):
+    result.id = gNodeId
+    if result.id == nodeIdToDebug:
+      echo "KIND ", result.kind
+      writeStackTrace()
+    inc gNodeId
 
 proc newNodeIT(kind: TNodeKind, info: TLineInfo, typ: PType): PNode = 
   result = newNode(kind)
@@ -1146,14 +1178,33 @@ proc newSons(father: PNode, length: int) =
   else:
     setlen(father.sons, length)
 
-proc addSon*(father, son: PType) {.deprecated.} =
-  if isNil(father.sons): father.sons = @[]
-  add(father.sons, son)
-  #assert((father.kind != tyGenericInvokation) or (son.kind != tyGenericInst))
+proc propagateToOwner*(owner, elem: PType) =
+  const HaveTheirOwnEmpty =  {tySequence, tySet}
+  owner.flags = owner.flags + (elem.flags * {tfHasShared, tfHasMeta,
+                                             tfHasGCedMem})
+  if tfNotNil in elem.flags:
+    if owner.kind in {tyGenericInst, tyGenericBody, tyGenericInvokation}:
+      owner.flags.incl tfNotNil
+    elif owner.kind notin HaveTheirOwnEmpty:
+      owner.flags.incl tfNeedsInit
+  
+  if tfNeedsInit in elem.flags:
+    if owner.kind in HaveTheirOwnEmpty: nil
+    else: owner.flags.incl tfNeedsInit
+    
+  if tfShared in elem.flags:
+    owner.flags.incl tfHasShared
+  
+  if elem.kind in {tyExpr, tyTypeDesc}:
+    owner.flags.incl tfHasMeta
+  elif elem.kind in {tyString, tyRef, tySequence} or
+      elem.kind == tyProc and elem.callConv == ccClosure:
+    owner.flags.incl tfHasGCedMem
 
 proc rawAddSon*(father, son: PType) =
   if isNil(father.sons): father.sons = @[]
   add(father.sons, son)
+  if not son.isNil: propagateToOwner(father, son)
 
 proc addSon(father, son: PNode) = 
   assert son != nil
@@ -1178,6 +1229,9 @@ proc copyNode(src: PNode): PNode =
   result.info = src.info
   result.typ = src.typ
   result.flags = src.flags * PersistentNodeFlags
+  when defined(useNodeIds):
+    if result.id == nodeIdToDebug:
+      echo "COMES FROM ", src.id
   case src.Kind
   of nkCharLit..nkUInt64Lit: result.intVal = src.intVal
   of nkFloatLit..nkFloat128Lit: result.floatVal = src.floatVal
@@ -1193,6 +1247,9 @@ proc shallowCopy*(src: PNode): PNode =
   result.info = src.info
   result.typ = src.typ
   result.flags = src.flags * PersistentNodeFlags
+  when defined(useNodeIds):
+    if result.id == nodeIdToDebug:
+      echo "COMES FROM ", src.id
   case src.Kind
   of nkCharLit..nkUInt64Lit: result.intVal = src.intVal
   of nkFloatLit..nkFloat128Lit: result.floatVal = src.floatVal
@@ -1209,6 +1266,9 @@ proc copyTree(src: PNode): PNode =
   result.info = src.info
   result.typ = src.typ
   result.flags = src.flags * PersistentNodeFlags
+  when defined(useNodeIds):
+    if result.id == nodeIdToDebug:
+      echo "COMES FROM ", src.id
   case src.Kind
   of nkCharLit..nkUInt64Lit: result.intVal = src.intVal
   of nkFloatLit..nkFloat128Lit: result.floatVal = src.floatVal

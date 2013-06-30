@@ -18,9 +18,23 @@ Library Additions
 Changes affecting backwards compatibility
 -----------------------------------------
 
+- The scoping rules for the ``if`` statement changed for better interaction 
+  with the new syntactic construct ``(;)``.
+- ``OSError`` family of procedures has been deprecated. Procedures with the same
+  name but which take different parameters have been introduced. These procs now
+  require an error code to be passed to them. This error code can be retrieved
+  using the new ``OSLastError`` proc.
+
 
 Compiler Additions
 ------------------
+
+- The compiler can now warn about "uninitialized" variables. (There are no
+  real uninitialized variables in Nimrod as they are initialized to binary
+  zero). Activate via ``{.warning[Uninit]:on.}``.
+- The compiler now enforces the ``not nil`` constraint.
+- The compiler now supports a ``codegenDecl`` pragma for even more control
+  over the generated code.
 
 
 Language Additions
@@ -28,7 +42,9 @@ Language Additions
 
 - Arrays can now be declared with a single integer literal ``N`` instead of a
   range; the range is then ``0..N-1``.
-
+- ``macros.dumpTree`` and ``macros.dumpLisp`` have been made ``immediate``,
+  ``dumpTreeImm`` and ``dumpLispImm`` are now deprecated.
+- Added ``requiresInit`` pragma to enforce explicit initialization.
 
 
 2013-05-20 New website design!

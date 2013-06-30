@@ -20,7 +20,7 @@ on the different supported platforms. It is not a definition of the Nimrod
 programming language (therefore is the `manual <manual.html>`_).
 
 Nimrod is free software; it is licensed under the
-`GNU General Public License <gpl.html>`_.
+`MIT License <http://www.opensource.org/licenses/mit-license.php>`_.
 
 
 Compiler Usage
@@ -401,6 +401,21 @@ this to work. The conditional symbol ``objc`` is defined when the compiler
 emits Objective C code.
 
 
+CodegenDecl pragma
+------------------
+
+The `codegenDecl`:idx: pragma can be used to directly influence Nimrod's code
+generator. It receives a format string that determines how the variable or 
+proc is declared in the generated code:
+
+.. code-block:: nimrod
+  var
+    a {.codegenDecl: "$# progmem $#".}: int
+
+  proc myinterrupt() {.codegenDecl: "__interrupt $# $#$#".} =
+    echo "realistic interrupt handler"
+
+
 LineDir option
 --------------
 The `lineDir`:idx: option can be turned on or off. If turned on the
@@ -441,6 +456,14 @@ The `volatile`:idx: pragma is for variables only. It declares the variable as
 in C/C++).
 
 **Note**: This pragma will not exist for the LLVM backend.
+
+
+Nimrod idetools integration
+=======================
+
+Nimrod provides language integration with external IDEs through the
+idetools command. See the documentation of `idetools <idetools.html>`_
+for further information.
 
 
 Nimrod interactive mode

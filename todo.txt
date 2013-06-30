@@ -1,8 +1,8 @@
 version 0.9.4
 =============
 
-- make 'bind' default for templates and introduce 'mixin';
-  special rule for ``[]=``
+- make 'bind' default for templates and introduce 'mixin'
+- special rule for ``[]=``
 - ``=`` should be overloadable; requires specialization for ``=``; general
   lift mechanism in the compiler is already implemented for 'fields'
 - mocking support with ``tyProxy`` that does: fallback for ``.`` operator
@@ -15,16 +15,15 @@ version 0.9.4
 Bugs
 ====
 
+- simple closure iterator doesn't work
 - docgen: sometimes effects are listed twice
-- 'result' is not properly cleaned for NRVO
-- instantiated generics are listed in error messages
+- 'result' is not properly cleaned for NRVO --> use uninit checking instead
 - sneaking with qualifiedLookup() is really broken!
 - aporia.nim(968, 5) Error: ambiguous identifier: 'DELETE' -- 
   use a qualifier
 - blocks can "export" an identifier but the CCG generates {} for them ...
 - osproc execProcesses can deadlock if all processes fail (as experienced
   in c++ mode)
-- bootstrapping does not work in C++ mode
 - result = result shr 8 for the "system()" wrapper
 
 
@@ -32,7 +31,6 @@ version 0.9.x
 =============
 
 - macros as type pragmas
-- implement full 'not nil' checking; range[1..3] needs the same mechanism
 - implicit deref for parameter matching
 - lazy overloading resolution:
   * get rid of ``expr[typ]``, use perhaps ``static[typ]`` instead
@@ -142,6 +140,7 @@ Not essential for 1.0.0
 - implement closures that support nesting of *procs* > 1
 - object constructors: static check for fields if discriminator is known at 
   compile time
+- prove array accesses
 
 
 Optimizations

@@ -82,7 +82,7 @@ type
     of pkChar, pkGreedyRepChar: ch: char
     of pkCharChoice, pkGreedyRepSet: charChoice: ref set[char]
     of pkNonTerminal: nt: PNonTerminal
-    of pkBackRef..pkBackRefIgnoreStyle: index: range[1..MaxSubpatterns]
+    of pkBackRef..pkBackRefIgnoreStyle: index: range[0..MaxSubpatterns]
     else: sons: seq[TNode]
   PNonTerminal* = ref TNonTerminal
   
@@ -870,7 +870,6 @@ template `=~`*(s: string, pattern: TPeg): bool =
   bind maxSubpatterns
   when not definedInScope(matches):
     var matches {.inject.}: array[0..maxSubpatterns-1, string]
-    {.warning: "injected 'matches' might be affected by new scoping rules in 0.9.4".}
   match(s, pattern, matches)
 
 # ------------------------- more string handling ------------------------------
