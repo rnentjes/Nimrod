@@ -7,10 +7,13 @@
 #    distribution, for details about the copyright.
 #
 
+when defined(arduino):
+  include "system/arduino"
 
 # Bare-bones implementation of some things for embedded targets.
 
-proc writeToStdErr(msg: CString) = write(stdout, msg)
+when not defined(arduino):
+  proc writeToStdErr(msg: CString) = write(stdout, msg)
 
 proc chckIndx(i, a, b: int): int {.inline, compilerproc.}
 proc chckRange(i, a, b: int): int {.inline, compilerproc.}
@@ -41,11 +44,6 @@ proc reraiseException() {.compilerRtl.} =
   writeToStdErr("reraise not supported")
 
 proc WriteStackTrace() = nil
-
-proc setControlCHook(hook: proc () {.noconv.}) =
-  # ugly cast, but should work on all architectures:
-  type TSignalHandler = proc (sig: cint) {.noconv.}
-  c_signal(SIGINT, cast[TSignalHandler](hook))
 
 proc raiseRangeError(val: biggestInt) {.compilerproc, noreturn, noinline.} =
   writeToStdErr("value out of range")

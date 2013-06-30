@@ -28,82 +28,90 @@ type
 
   C_JmpBuf {.importc: "jmp_buf".} = array[0..31, int]
 
-var
-  c_stdin {.importc: "stdin", noDecl.}: C_TextFileStar
-  c_stdout {.importc: "stdout", noDecl.}: C_TextFileStar
-  c_stderr {.importc: "stderr", noDecl.}: C_TextFileStar
-
-# constants faked as variables:
-when not defined(SIGINT):
-  var 
-    SIGINT {.importc: "SIGINT", nodecl.}: cint
-    SIGSEGV {.importc: "SIGSEGV", nodecl.}: cint
-    SIGABRT {.importc: "SIGABRT", nodecl.}: cint
-    SIGFPE {.importc: "SIGFPE", nodecl.}: cint
-    SIGILL {.importc: "SIGILL", nodecl.}: cint
-
-when defined(macosx):
+when not defined(noIO):
   var
-    SIGBUS {.importc: "SIGBUS", nodecl.}: cint
-      # hopefully this does not lead to new bugs
-else:
-  var
-    SIGBUS {.importc: "SIGSEGV", nodecl.}: cint
-      # only Mac OS X has this shit
+    c_stdin {.importc: "stdin", noDecl.}: C_TextFileStar
+    c_stdout {.importc: "stdout", noDecl.}: C_TextFileStar
+    c_stderr {.importc: "stderr", noDecl.}: C_TextFileStar
+
+when hostOS != "standalone":
+  # constants faked as variables:
+  when not defined(SIGINT):
+    var 
+      SIGINT {.importc: "SIGINT", nodecl.}: cint
+      SIGSEGV {.importc: "SIGSEGV", nodecl.}: cint
+      SIGABRT {.importc: "SIGABRT", nodecl.}: cint
+      SIGFPE {.importc: "SIGFPE", nodecl.}: cint
+      SIGILL {.importc: "SIGILL", nodecl.}: cint
+
+  when defined(macosx):
+    var
+      SIGBUS {.importc: "SIGBUS", nodecl.}: cint
+        # hopefully this does not lead to new bugs
+  else:
+    var
+      SIGBUS {.importc: "SIGSEGV", nodecl.}: cint
+        # only Mac OS X has this shit
 
 proc c_longjmp(jmpb: C_JmpBuf, retval: cint) {.nodecl, importc: "longjmp".}
 proc c_setjmp(jmpb: var C_JmpBuf): cint {.nodecl, importc: "setjmp".}
 
-proc c_signal(sig: cint, handler: proc (a: cint) {.noconv.}) {.
-  importc: "signal", header: "<signal.h>".}
-proc c_raise(sig: cint) {.importc: "raise", header: "<signal.h>".}
+when hostOS != "standalone":
+  proc c_signal(sig: cint, handler: proc (a: cint) {.noconv.}) {.
+    importc: "signal", header: "<signal.h>".}
+  proc c_raise(sig: cint) {.importc: "raise", header: "<signal.h>".}
 
-proc c_fputs(c: cstring, f: C_TextFileStar) {.importc: "fputs", noDecl.}
-proc c_fgets(c: cstring, n: int, f: C_TextFileStar): cstring  {.
-  importc: "fgets", noDecl.}
-proc c_fgetc(stream: C_TextFileStar): int {.importc: "fgetc", nodecl.}
-proc c_ungetc(c: int, f: C_TextFileStar) {.importc: "ungetc", nodecl.}
-proc c_putc(c: Char, stream: C_TextFileStar) {.importc: "putc", nodecl.}
+when hostOS != "standalone":
+  proc c_fputs(c: cstring, f: C_TextFileStar) {.importc: "fputs", noDecl.}
+  proc c_fgets(c: cstring, n: int, f: C_TextFileStar): cstring  {.
+    importc: "fgets", noDecl.}
+  proc c_fgetc(stream: C_TextFileStar): int {.importc: "fgetc", nodecl.}
+  proc c_ungetc(c: int, f: C_TextFileStar) {.importc: "ungetc", nodecl.}
+  proc c_putc(c: Char, stream: C_TextFileStar) {.importc: "putc", nodecl.}
 proc c_fprintf(f: C_TextFileStar, frmt: CString) {.
   importc: "fprintf", nodecl, varargs.}
 proc c_printf(frmt: CString) {.
   importc: "printf", nodecl, varargs.}
 
-proc c_fopen(filename, mode: cstring): C_TextFileStar {.
-  importc: "fopen", nodecl.}
-proc c_fclose(f: C_TextFileStar) {.importc: "fclose", nodecl.}
+when hostOS != "standalone":
+  proc c_fopen(filename, mode: cstring): C_TextFileStar {.
+    importc: "fopen", nodecl.}
+  proc c_fclose(f: C_TextFileStar) {.importc: "fclose", nodecl.}
 
 proc c_sprintf(buf, frmt: CString) {.nodecl, importc: "sprintf", varargs,
                                      noSideEffect.}
   # we use it only in a way that cannot lead to security issues
 
-proc c_fread(buf: Pointer, size, n: int, f: C_BinaryFileStar): int {.
-  importc: "fread", noDecl.}
-proc c_fseek(f: C_BinaryFileStar, offset: clong, whence: int): int {.
-  importc: "fseek", noDecl.}
+when hostOS != "standalone":
+  proc c_fread(buf: Pointer, size, n: int, f: C_BinaryFileStar): int {.
+    importc: "fread", noDecl.}
+  proc c_fseek(f: C_BinaryFileStar, offset: clong, whence: int): int {.
+    importc: "fseek", noDecl.}
 
-proc c_fwrite(buf: Pointer, size, n: int, f: C_BinaryFileStar): int {.
-  importc: "fwrite", noDecl.}
+  proc c_fwrite(buf: Pointer, size, n: int, f: C_BinaryFileStar): int {.
+    importc: "fwrite", noDecl.}
 
-proc c_exit(errorcode: cint) {.importc: "exit", nodecl.}
-proc c_ferror(stream: C_TextFileStar): bool {.importc: "ferror", nodecl.}
-proc c_fflush(stream: C_TextFileStar) {.importc: "fflush", nodecl.}
-proc c_abort() {.importc: "abort", nodecl.}
-proc c_feof(stream: C_TextFileStar): bool {.importc: "feof", nodecl.}
+  proc c_exit(errorcode: cint) {.importc: "exit", nodecl.}
+  proc c_ferror(stream: C_TextFileStar): bool {.importc: "ferror", nodecl.}
+  proc c_fflush(stream: C_TextFileStar) {.importc: "fflush", nodecl.}
+  proc c_abort() {.importc: "abort", nodecl.}
+  proc c_feof(stream: C_TextFileStar): bool {.importc: "feof", nodecl.}
 
-proc c_malloc(size: int): pointer {.importc: "malloc", nodecl.}
-proc c_free(p: pointer) {.importc: "free", nodecl.}
-proc c_realloc(p: pointer, newsize: int): pointer {.importc: "realloc", nodecl.}
+when not defined(noDynamicAlloc):
+  proc c_malloc(size: int): pointer {.importc: "malloc", nodecl.}
+  proc c_free(p: pointer) {.importc: "free", nodecl.}
+  proc c_realloc(p: pointer, newsize: int): pointer {.importc: "realloc", nodecl.}
 
-when not defined(errno):
-  var errno {.importc, header: "<errno.h>".}: cint ## error variable
-proc strerror(errnum: cint): cstring {.importc, header: "<string.h>".}
+when hostOS != "standalone":
+  when not defined(errno):
+    var errno {.importc, header: "<errno.h>".}: cint ## error variable
+  proc strerror(errnum: cint): cstring {.importc, header: "<string.h>".}
 
-proc c_remove(filename: CString): cint {.importc: "remove", noDecl.}
-proc c_rename(oldname, newname: CString): cint {.importc: "rename", noDecl.}
+  proc c_remove(filename: CString): cint {.importc: "remove", noDecl.}
+  proc c_rename(oldname, newname: CString): cint {.importc: "rename", noDecl.}
 
-proc c_system(cmd: CString): cint {.importc: "system", header: "<stdlib.h>".}
-proc c_getenv(env: CString): CString {.importc: "getenv", noDecl.}
-proc c_putenv(env: CString): cint {.importc: "putenv", noDecl.}
+  proc c_system(cmd: CString): cint {.importc: "system", header: "<stdlib.h>".}
+  proc c_getenv(env: CString): CString {.importc: "getenv", noDecl.}
+  proc c_putenv(env: CString): cint {.importc: "putenv", noDecl.}
 
 {.pop}
