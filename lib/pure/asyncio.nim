@@ -6,7 +6,7 @@
 #    distribution, for details about the copyright.
 #
 
-import sockets, os
+import sockets, os, macros, strutils
 
 ## This module implements an asynchronous event loop together with asynchronous sockets
 ## which use this event loop.
@@ -31,10 +31,10 @@ import sockets, os
 ## on with the events. The type that you set userArg to must be inheriting from
 ## TObject!
 ##
-## **Note:** If you want to provide async ability to your module please do not 
-## use the ``TDelegate`` object, instead use ``PAsyncSocket``. It is possible 
-## that in the future this type's fields will not be exported therefore breaking
-## your code.
+## **Note:** If you are after using this module to provide async functionality
+## for one of your modules then it is best to use PAsyncSocket if your module
+## only requires sockets. For non-socket objects with a select-like interface
+## a TDelegate implementation should be created, if one doesn't already exist.
 ##
 ## **Warning:** The API of this module is unstable, and therefore is subject
 ## to change.
@@ -109,10 +109,6 @@ type
     
   PDelegate* = ref TDelegate
 
-  PDispatcher* = ref TDispatcher
-  TDispatcher = object
-    delegates: seq[PDelegate]
-
   PAsyncSocket* = ref TAsyncSocket
   TAsyncSocket* = object of TObject
     socket: TSocket
@@ -135,6 +131,43 @@ type
   TInfo* = enum
     SockIdle, SockConnecting, SockConnected, SockListening, SockClosed, 
     SockUDPBound
+
+  TRequestKind* = enum
+    reqNil, reqReg, reqRead, reqWrite, reqReadLine, reqAccept
+  
+  PRequest* = ref object
+    socket*: PAsyncSocket
+    case hasException*: bool
+    of true:
+      exc*: ref EBase
+    of false: nil
+    case kind*: TRequestKind
+    of reqNil:
+      nil
+    of reqReg:
+      param*: PObject
+      worker*: iterator (x: PRequest): PRequest
+    of reqRead:
+      count*: int            ## Request
+      readData*: string      ## Response
+    of reqWrite:
+      toWrite*: string       ## Request
+      written: int           ## Internal data
+    of reqReadLine:
+      line*: string  ## Response
+    of reqAccept:
+      client*: PAsyncSocket  ## Response
+  
+  PWorker* = ref object
+    worker: iterator (x: PRequest): PRequest {.closure.}
+    x: PRequest
+    lastReq: PRequest
+
+  PDispatcher* = ref TDispatcher
+  TDispatcher = object
+    usesDelegates: bool
+    delegates: seq[PDelegate]
+    requests: array[TRequestKind, seq[PWorker]]
 
 proc newDelegate*(): PDelegate =
   ## Creates a new delegate.
@@ -382,9 +415,15 @@ proc accept*(server: PAsyncSocket): PAsyncSocket {.deprecated.} =
   var address = ""
   server.acceptAddr(result, address)
 
-proc newDispatcher*(): PDispatcher =
+proc newRequests(): array[TRequestKind, seq[PWorker]] =
+  for req in TRequestKind:
+    result[req] = @[]
+
+proc newDispatcher*(useDelegates = true): PDispatcher =
   new(result)
   result.delegates = @[]
+  result.requests = newRequests()
+  result.usesDelegates = useDelegates
 
 proc register*(d: PDispatcher, deleg: PDelegate) =
   ## Registers delegate ``deleg`` with dispatcher ``d``.
@@ -569,6 +608,87 @@ proc select(readfds, writefds, exceptfds: var seq[PDelegate],
   pruneSocketSet(writefds, (wr))
   pruneSocketSet(exceptfds, (ex))
 
+proc createFdSet(fd: var TFdSet, s: seq[PWorker], m: var int) =
+  FD_ZERO(fd)
+  for i in items(s): 
+    m = max(m, int(i.lastReq.socket.getFD))
+    FD_SET(i.lastReq.socket.getFD, fd)
+   
+proc pruneSocketSet(s: var seq[PWorker], fd: var TFdSet) =
+  var i = 0
+  var L = s.len
+  while i < L:
+    if FD_ISSET(s[i].lastReq.socket.getFD, fd) != 0'i32:
+      s[i] = s[L-1]
+      dec(L)
+    else:
+      inc(i)
+  setLen(s, L)
+
+proc select(readfds: var seq[PWorker], writefds: var seq[PWorker],
+             timeout = 500): int =
+  var tv {.noInit.}: TTimeVal = timeValFromMilliseconds(timeout)
+  
+  var rd, wr, ex: TFdSet
+  var m = 0
+  createFdSet(rd, readfds, m)
+  createFdSet(wr, writefds, m)
+  #createFdSet(ex, @[], m)
+  
+  if timeout != -1:
+    result = int(select(cint(m+1), addr(rd), addr(wr), addr(ex), addr(tv)))
+  else:
+    result = int(select(cint(m+1), addr(rd), addr(wr), addr(ex), nil))
+
+  pruneSocketSet(readfds, (rd))
+  pruneSocketSet(writefds, (wr))
+  #pruneSocketSet(exceptfds, (ex))
+
+proc register*(disp: PDispatcher, worker: iterator (x: PRequest): PRequest,
+               param: PObject) =
+  #= PWorker(socket, worker, PRequest(kind: reqNil))
+  assert(not disp.usesDelegates,
+        "You need to set ``usesDelegates`` to false in the newDispatcher proc.")
+  var req = PWorker(
+      worker: worker,
+      x: PRequest(kind: reqReg, param: param, worker: nil),
+      lastReq: PRequest(kind: reqNil)
+    )
+  disp.requests[reqNil].add(req)
+
+proc processWorkers(d: PDispatcher) =
+  var newRequests: array[TRequestKind, seq[PWorker]] = d.requests
+  newRequests[reqNil] = @[]
+  for idle in d.requests[reqNil]:
+    let req = idle.worker(idle.x)
+    if req != nil:
+      if req.kind == reqReg:
+        newRequests[reqNil].add(idle)
+        let newWorker = PWorker(worker: req.worker, lastReq: PRequest(kind: reqNil),
+                                x: req)
+        newRequests[reqNil].add(newWorker)
+      else:
+        idle.lastReq = req
+        newRequests[req.kind].add(idle)
+    else:
+      assert idle.worker.finished
+  d.requests = newRequests
+
+template popu(req) {.immediate, dirty.} =
+  for i in d.requests[req]:
+    result.add(i)
+
+proc populateRead(d: PDispatcher): seq[PWorker] =
+  result = @[]
+
+  popu(reqRead)
+  popu(reqReadLine)
+  popu(reqAccept)
+
+proc populateWrite(d: PDispatcher): seq[PWorker] =
+  result = @[]
+  popu(reqWrite)
+
 proc poll*(d: PDispatcher, timeout: int = 500): bool =
   ## This function checks for events on all the delegates in the `PDispatcher`.
   ## It then proceeds to call the correct event handler.
@@ -582,57 +702,307 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
   ## only be executed after one or more file descriptors becomes readable or
   ## writeable.
   result = true
-  var readDg, writeDg, errorDg: seq[PDelegate] = @[]
-  var len = d.delegates.len
-  var dc = 0
-  
-  while dc < len:
-    let deleg = d.delegates[dc]
-    if (deleg.mode != fmWrite or deleg.mode != fmAppend) and deleg.open:
-      readDg.add(deleg)
-    if (deleg.mode != fmRead) and deleg.open:
-      writeDg.add(deleg)
-    if deleg.open:
-      errorDg.add(deleg)
-      inc dc
-    else:
-      # File/socket has been closed. Remove it from dispatcher.
-      d.delegates[dc] = d.delegates[len-1]
-      dec len
-      
-  d.delegates.setLen(len)
-  
-  var hasDataBufferedCount = 0
-  for d in d.delegates:
-    if d.hasDataBuffered(d.deleVal):
-      hasDataBufferedCount.inc()
-      d.handleRead(d.deleVal)
-  if hasDataBufferedCount > 0: return True
-  
-  if readDg.len() == 0 and writeDg.len() == 0:
-    ## TODO: Perhaps this shouldn't return if errorDg has something?
-    return False
-  
-  if select(readDg, writeDg, errorDg, timeout) != 0:
-    for i in 0..len(d.delegates)-1:
-      if i > len(d.delegates)-1: break # One delegate might've been removed.
-      let deleg = d.delegates[i]
-      if not deleg.open: continue # This delegate might've been closed.
-      if (deleg.mode != fmWrite or deleg.mode != fmAppend) and
-          deleg notin readDg:
-        deleg.handleRead(deleg.deleVal)
-      if (deleg.mode != fmRead) and deleg notin writeDg:
-        deleg.handleWrite(deleg.deleVal)
-      if deleg notin errorDg:
-        deleg.handleError(deleg.deleVal)
-  
-  # Execute tasks
-  for i in items(d.delegates):
-    i.task(i.deleVal)
+  if d.usesDelegates:
+    var readDg, writeDg, errorDg: seq[PDelegate] = @[]
+    var len = d.delegates.len
+    var dc = 0
+    
+    while dc < len:
+      let deleg = d.delegates[dc]
+      if (deleg.mode != fmWrite or deleg.mode != fmAppend) and deleg.open:
+        readDg.add(deleg)
+      if (deleg.mode != fmRead) and deleg.open:
+        writeDg.add(deleg)
+      if deleg.open:
+        errorDg.add(deleg)
+        inc dc
+      else:
+        # File/socket has been closed. Remove it from dispatcher.
+        d.delegates[dc] = d.delegates[len-1]
+        dec len
+        
+    d.delegates.setLen(len)
+    
+    var hasDataBufferedCount = 0
+    for d in d.delegates:
+      if d.hasDataBuffered(d.deleVal):
+        hasDataBufferedCount.inc()
+        d.handleRead(d.deleVal)
+    if hasDataBufferedCount > 0: return True
+    
+    if readDg.len() == 0 and writeDg.len() == 0:
+      ## TODO: Perhaps this shouldn't return if errorDg has something?
+      return False
+    
+    if select(readDg, writeDg, errorDg, timeout) != 0:
+      for i in 0..len(d.delegates)-1:
+        if i > len(d.delegates)-1: break # One delegate might've been removed.
+        let deleg = d.delegates[i]
+        if not deleg.open: continue # This delegate might've been closed.
+        if (deleg.mode != fmWrite or deleg.mode != fmAppend) and
+            deleg notin readDg:
+          deleg.handleRead(deleg.deleVal)
+        if (deleg.mode != fmRead) and deleg notin writeDg:
+          deleg.handleWrite(deleg.deleVal)
+        if deleg notin errorDg:
+          deleg.handleError(deleg.deleVal)
+    
+    # Execute tasks
+    for i in items(d.delegates):
+      i.task(i.deleVal)
+  else:
+    # Async worker iterators
+    processWorkers(d)
+    var readWorkers = populateRead(d)
+    var writeWorkers = populateWrite(d)
+    echo(readWorkers.len, " ", d.requests[reqNil].len, d.requests[reqReadLine].len)
+    if select(readWorkers, writeWorkers, timeout) != 0:
+      var newRequests: array[TRequestKind, seq[PWorker]] = newRequests()
+      for req in TRequestKind:
+        for worker in d.requests[req]:
+          echo(req)
+          var addTo = req
+          template execReq(workers: var seq[PWorker], autoadd: bool,
+                           body: stmt) {.immediate, dirty.} = 
+            if worker notin workers:
+              # Worker is ready to read. Let's read.
+              try:
+                body
+              except:
+                worker.lastReq.hasException = true
+                worker.lastReq.exc = getCurrentException()
+              finally:
+                if autoAdd:
+                  addTo = reqNil
+          
+          case req
+          of reqReadLine:
+            execReq readWorkers, false:
+              if worker.lastReq.socket.readLine(worker.lastReq.line):
+                addTo = reqNil
+          of reqAccept:
+            execReq readWorkers, true:
+              worker.lastReq.client = newAsyncSocket()
+              worker.lastReq.socket.accept(worker.lastReq.client)
+          of reqRead:
+            # We guarantee that all requested data will be read.
+            execReq readWorkers, false:
+              proc doRead(count: int) =
+                let got = worker.lastReq.socket.recvAsync(
+                              worker.lastReq.readData, count)
+                assert got != -1
+                if got == count:
+                  addTo = reqNil # Everything has been read
+              if worker.lastReq.readData.len == 0:
+                doRead(worker.lastReq.count)
+              else:
+                doRead(worker.lastReq.count-worker.lastReq.readData.len)
+
+          of reqWrite:
+            # We guarantee that all the data that is requested to be sent, will
+            # be sent.
+
+            execReq writeWorkers, false:
+              let written = worker.lastReq.written
+              proc doSend(toWrite: string) =
+                let len = toWrite.len
+                let sent = worker.lastReq.socket.sendAsync(toWrite)
+                assert sent != 0 # /Something/ should have been written.
+                if sent == len:
+                  # Sent all data, request complete.
+                  addTo = reqNil
+                else:
+                  # Didn't send all data, must send the rest later.
+                  worker.lastReq.written.inc(sent)
+              
+              if written == 0:
+                doSend(worker.lastReq.toWrite)
+              else:
+                let toWrite = worker.lastReq.toWrite[written .. -1]
+                doSend(toWrite)
+          of reqReg:
+            assert false, "reqReg should have been processed already"
+          of reqNil:
+            assert false, "reqNil should have been processed already"
+          
+          newRequests[addTo].add(worker)
+      d.requests = newRequests
 
 proc len*(disp: PDispatcher): int =
   ## Retrieves the amount of delegates in ``disp``.
   return disp.delegates.len
+
+# ---- Async macro
+
+proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
+  ## Transforms a var/let section
+  ## E.g:
+  ##  let client = await(accept(server))
+  result = @[]
+  let nameIdent = n[0][0].ident # Var name
+  expectLen(n[0], 3) # IdentDefs
+  let insideAwait = n[0][2][1]
+  let reqCall = $insideAwait[0].ident
+  case reqCall
+  of "accept":
+    expectLen(insideAwait, 2)
+    let sockName = $insideAwait[1].ident
+    let acceptReqVar = "acceptReq"
+    # TODO: Random var names which do not conflict. or wait for gensym?
+    var reqObj = parseExpr(
+          """var $# = PRequest(socket: $#, kind: reqAccept,
+                               client: nil)""" %
+          [acceptReqVar, sockName])
+    result.add reqObj
+    result.add parseExpr("yield $#" % [acceptReqVar])
+    # Check for exception
+    result.add parseStmt("if $1.hasException: raise $1.exc" % [acceptReqVar])
+    case n.kind
+    of nnkLetSection:
+      result.add parseExpr("let $# = $#.client" % [$nameIdent, acceptReqVar])
+    of nnkVarSection:
+      result.add parseExpr("var $# = $#.client" % [$nameIdent, acceptReqVar])
+    else: error "Bad node kind in toYieldVar"
+  else:
+    error(reqCall & " is not a valid async call")
+
+const typeDef =
+  """
+  type
+    PArgObject = ref object of TObject
+  """
+
+proc transformCallWithArg(call: PNimrodNode): PNimrodNode {.compiletime.} =
+  result = parseStmt(typeDef)
+  var RecList = newNimNode(nnkRecList)
+  for i in 1 .. call[1].len-1:
+    var typeOf = newNimNode(nnkTypeOfExpr).add(newNimNode(nnkPar))
+    typeOf[0].add(call[1][i])
+    case call[1][i].kind
+    of nnkIdent:
+      RecList.add newIdentDefs(call[1][i], typeOf)
+    of nnkLiterals:
+      RecList.add newIdentDefs(newIdentNode("dummy" & $i), typeOf)
+    else: assert false
+  
+  result[0][0][2][0][2] = RecList
+  result.add parseExpr("var argsToPass: PArgObject")
+  result.add parseExpr("new argsToPass")
+  
+  for i in 1 .. call[1].len-1:
+    case call[1][i].kind
+    of nnkIdent:
+      result.add parseExpr("argsToPass.$1 = $1" % [$call[1][i].ident])
+    of nnkLiterals:
+      let dotExpr = newDotExpr(newIdentNode("argsToPass"),
+                               newIdentNode("dummy" & $i))
+      result.add newAssignment(dotExpr, call[1][i])
+    else: assert false
+
+proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
+  ## Transforms a call/command
+  if $n[0].ident != "await": error "'await' expected"
+  result = @[]
+  let callIdent = $n[1][0].ident
+  case callIdent
+  of "send": error("TODO")
+  else:
+    result.add(transformCallWithArg(n))
+    # reqRegister
+    result.add parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#, param: argsToPass)" %
+                         [$n[1][1].ident, callIdent])
+
+proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
+  result = newNimNode(nnkStmtList)
+  expectKind(n, nnkStmtList)
+  for i in 0 .. n.len-1:
+    var son = n[i]
+    case son.kind
+    of nnkVarSection, nnkLetSection:
+      for defs in 0 .. son.len-1:
+        var doAdd = true
+        let identDefs = son[defs]
+        expectKind(identDefs, nnkIdentDefs)
+        if identDefs[2].kind == nnkCall:
+          let callIdent = identDefs[2][0]
+          expectKind(callIdent, nnkIdent)
+          if $callIdent.ident == "await":
+            # Transform into yield.
+            result.add(toYieldVar(son))
+            doAdd = false
+        if doAdd:
+          var letOrVarSection = newNimNode(son.kind)
+          letOrVarSection.add(identDefs)
+          result.add(letOrVarSection)
+    of nnkWhileStmt:
+      son[1] = transform(son[1])
+      result.add(son)
+    of nnkCall, nnkCommand:
+      if son[0].kind == nnkIdent and $son[0].ident == "await":
+        result.add toYieldCall(son)
+      else:
+        result.add son
+    else:
+      result.add(son)
+
+proc transformArgs(formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
+  ## Transforms formal params into a typedef with a dummy type
+  ## ``ref object of TObject``. The PRequest.param is then casted to it,
+  ## and immutable vars are defined as specified the proc's params.
+  expectKind(formalParams, nnkFormalParams)
+  result = parseStmt(typeDef)
+  
+  var RecList = newNimNode(nnkRecList)
+  
+  for i in 1 .. formalParams.len-1:
+    expectKind(formalParams[i], nnkIdentDefs)
+    RecList.add(formalParams[i])
+  
+  result[0][0][2][0][2] = RecList
+
+  result.add(parseExpr("let passedInParams = cast[PArgObject](x.param)"))
+  for i in 1 .. formalParams.len-1:
+    expectKind(formalParams[i], nnkIdentDefs)
+    result.add(parseExpr("let $1: $2 = passedInParams.$1" % 
+                    [$formalParams[i][0].ident, $formalParams[i][1].ident]))
+
+macro async*(n: stmt): stmt {.immediate.} =
+  expectKind(n, nnkProcDef)
+  #echo("-------------")
+  result = newNimNode(nnkIteratorDef)
+  for i in 0 .. n.len-1:
+    result.add(copyNimTree(n[i]))
+  
+  # Populate ``FormalParams``
+  assert result[3].kind == nnkFormalParams
+  let formalParams = newNimNode(nnkFormalParams)
+  formalParams.add(newIdentNode(!"PRequest")) # Return type
+  var params = newNimNode(nnkIdentDefs)
+  params.add(newIdentNode(!"x"))        # First param name
+  params.add(newIdentNode(!"PRequest")) # First param type
+  params.add(newNimNode(nnkEmpty))
+  formalParams.add(params)
+  result[3] = formalParams
+  
+  # Pragma
+  result[4].add(newIdentNode(!"closure"))
+  
+  result[6] = newNimNode(nnkStmtList)
+  
+  # Transform any params passed to the proc into a typedef.
+  if n[3].len > 1:
+    let transfArgs = transformArgs(n[3])
+    
+    result[6].add(transfArgs)
+  
+  # Body
+  var body = transform(n[6])
+  result[6].add(body)
+  
+  #echo treeRepr(result)
+  echo result.toStrLit().strVal
+
+# ---- Async macro end
 
 when isMainModule:
 
