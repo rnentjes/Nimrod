@@ -1067,12 +1067,13 @@ macro async*(n: stmt): stmt {.immediate.} =
 
 # ---- Async macro end
 
-proc send*(socket: PAsyncSocket, text: string) {.async.} =
-  ## Sends ``text`` to ``socket`` asynchronously.
+when defined(nimdoc):
+  proc send*(socket: PAsyncSocket, text: string) {.async.} =
+    ## Sends ``text`` to ``socket`` asynchronously.
 
-proc accept*(socket: PAsyncSocket): PAsyncSocket {.async.} =
-  ## Accepts a client connecting to a server socket asynchronously.
-  ## Returns that client.
+  proc accept*(socket: PAsyncSocket): PAsyncSocket {.async.} =
+    ## Accepts a client connecting to a server socket asynchronously.
+    ## Returns that client.
 
 when isMainModule:
 
