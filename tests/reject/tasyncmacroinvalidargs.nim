@@ -1,3 +1,6 @@
+discard """
+  msg: "type mismatch: got (int literal(234)) but expected 'string'"
+"""
 import sockets, asyncio, strutils
 
 proc processRequest(client: PAsyncSocket, test: string) {.async.} =
@@ -21,7 +24,7 @@ proc processServer() {.async.} =
   while true:
     let client: PAsyncSocket = await(accept(sock))
     assert client != nil
-    await processRequest(client, "ahha")
+    await processRequest(client, 234)
 
 var disp = newDispatcher(false)
 disp.register(processServer, nil)

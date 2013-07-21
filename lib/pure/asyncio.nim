@@ -907,6 +907,14 @@ proc transformCallWithArg(call: PNimrodNode): PNimrodNode {.compiletime.} =
       result.add newAssignment(dotExpr, call[1][i])
     else: assert false
 
+  # Add in a call to a pre-generated proc stub so that the compiler verifies
+  # the params for us :)
+  # TODO: Make sure this doesn't actually get called, maybe inline it?
+  var args: seq[PNimrodNode] = @[]
+  for i in 1 .. call[1].len-1:
+    args.add(call[1][i])
+  result.add newCall(call[1][0], args) 
+
 proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   ## Transforms a call/command
   if $n[0].ident != "await": error "'await' expected"
@@ -994,6 +1002,14 @@ proc isDocumentation(n: PNimrodNode): bool {.compiletime.} =
     if n[6][i].kind != nnkCommentStmt:
       return false
 
+proc createVerificationProc(procName: PNimrodNode,
+                    formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
+  # TODO: Export this stub if our async proc is exported?
+  var kids: seq[PNimrodNode] = @[]
+  for i in 0 .. formalParams.len-1:
+    kids.add(formalParams[i])
+  result = newProc(procName, kids)
+
 macro async*(n: stmt): stmt {.immediate.} =
   expectKind(n, nnkProcDef)
   #echo(treeRepr(n))
@@ -1041,6 +1057,9 @@ macro async*(n: stmt): stmt {.immediate.} =
     let procDef = copyNimTree(result)
     result = newNimNode(nnkStmtList)
     result.add(transformArgs($n[0].ident, n[3]))
+    # Generate a proc stub to verify that the user passes the correct params.
+    result.add createVerificationProc(n[0], n[3])
+    
     result.add procDef
   
   #echo treeRepr(result)
