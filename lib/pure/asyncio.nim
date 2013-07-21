@@ -1067,13 +1067,42 @@ macro async*(n: stmt): stmt {.immediate.} =
 
 # ---- Async macro end
 
-when defined(nimdoc):
+## Asynchronous IO without callbacks
+## =====================
+## The implementation of this is similar to what is known as ``futures``
+## in other languages. The ``await`` keyword is used to call a procedure
+## which is marked with an ``{.async.}`` pragma. The ``async`` procedures
+## get transformed into an iterator. When you execute a procedure which may
+## block using ``await`` then the execution of your procedure will stop
+## until the procedure you executed has completed. While your procedure's
+## execution is stopped, other async procedures can continue executing.
+##
+## The built-in functions which can be used using ``await`` are listed below:
+##
+## .. code-block:: nimrod
+##   
+##    proc send*(socket: PAsyncSocket, text: string) {.async.} =
+##
+##   Sends ``text`` to ``socket`` asynchronously.
+##
+## .. code-block:: nimrod
+##   
+##    proc accept*(socket: PAsyncSocket): PAsyncSocket {.async.} =
+##
+##   Accepts a client connecting to a server socket asynchronously.
+##   Returns that client.
+##
+## You may also define your own async procedures by annotating them with
+## the ``{.async.}`` pragma, please note however that currently you cannot
+## overload these procedures.
+
+discard """ when defined(nimdoc) and isMainModule:
   proc send*(socket: PAsyncSocket, text: string) {.async.} =
     ## Sends ``text`` to ``socket`` asynchronously.
 
   proc accept*(socket: PAsyncSocket): PAsyncSocket {.async.} =
     ## Accepts a client connecting to a server socket asynchronously.
-    ## Returns that client.
+    ## Returns that client. """
 
 when isMainModule:
 
