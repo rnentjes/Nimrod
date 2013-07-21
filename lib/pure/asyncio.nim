@@ -133,7 +133,7 @@ type
     SockUDPBound
 
   TRequestKind* = enum
-    reqNil, reqReg, reqRead, reqWrite, reqReadLine, reqAccept
+    reqNil, reqReg, reqRead, reqWrite, reqReadLine, reqAccept, reqConnect
   
   PRequest* = ref object
     socket*: PAsyncSocket
@@ -154,10 +154,12 @@ type
       toWrite*: string       ## Request
       written: int           ## Internal data
     of reqReadLine:
-      line*: string  ## Response
+      line*: string          ## Response
     of reqAccept:
       client*: PAsyncSocket  ## Response
-  
+    of reqConnect:
+      address*: string       ## Request
+      
   PWorker* = ref object
     worker: iterator (x: PRequest): PRequest {.closure.}
     x: PRequest
@@ -820,6 +822,8 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
               else:
                 let toWrite = worker.lastReq.toWrite[written .. -1]
                 doSend(toWrite)
+          of reqConnect:
+            #execReq 
           of reqReg:
             assert false, "reqReg should have been processed already"
           of reqNil:
@@ -834,6 +838,17 @@ proc len*(disp: PDispatcher): int =
 
 # ---- Async macro
 
+proc createRequestNode(varName,
+                       reqArgs: string): PNimrodNode {.compiletime.} =
+  result = newNimNode(nnkStmtList)
+  var reqObj = parseExpr(
+        """var $# = PRequest($#)""" %
+        [varName, reqArgs])
+  result.add reqObj
+  result.add parseExpr("yield $#" % [varName])
+  # Check for exception
+  result.add parseStmt("if $1.hasException: raise $1.exc" % [varName])
+
 proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   ## Transforms a var/let section
   ## E.g:
@@ -843,25 +858,31 @@ proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   expectLen(n[0], 3) # IdentDefs
   let insideAwait = n[0][2][1]
   let reqCall = $insideAwait[0].ident
-  case reqCall
+  
+  expectLen(insideAwait, 2)
+  let sockName = $insideAwait[1].ident
+  case reqCall.normalize
   of "accept":
-    expectLen(insideAwait, 2)
-    let sockName = $insideAwait[1].ident
     let acceptReqVar = "acceptReq"
     # TODO: Random var names which do not conflict. or wait for gensym?
-    var reqObj = parseExpr(
-          """var $# = PRequest(socket: $#, kind: reqAccept,
-                               client: nil)""" %
-          [acceptReqVar, sockName])
-    result.add reqObj
-    result.add parseExpr("yield $#" % [acceptReqVar])
-    # Check for exception
-    result.add parseStmt("if $1.hasException: raise $1.exc" % [acceptReqVar])
+    result.add createRequestNode(acceptReqVar,
+                 "socket: $#, kind: reqAccept, client: nil" % sockName)
     case n.kind
     of nnkLetSection:
       result.add parseExpr("let $# = $#.client" % [$nameIdent, acceptReqVar])
     of nnkVarSection:
       result.add parseExpr("var $# = $#.client" % [$nameIdent, acceptReqVar])
+    else: error "Bad node kind in toYieldVar"
+  of "readline":
+    let readReqVar = "readLineReq"
+    # TODO: Random var names which do not conflict. or wait for gensym?
+    result.add createRequestNode(readReqVar,
+                 "socket: $#, kind: reqReadLine, line: \"\"" % sockName)
+    case n.kind
+    of nnkLetSection:
+      result.add parseExpr("let $# = $#.line" % [$nameIdent, readReqVar])
+    of nnkVarSection:
+      result.add parseExpr("var $# = $#.line" % [$nameIdent, readReqVar])
     else: error "Bad node kind in toYieldVar"
   else:
     error(reqCall & " is not a valid async call")
@@ -869,31 +890,18 @@ proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
 const typeDef =
   """
   type
-    PArgObject = ref object of TObject
+    P$#ArgObject = ref object of TObject
   """
 
 proc transformCallWithArg(call: PNimrodNode): PNimrodNode {.compiletime.} =
-  result = parseStmt(typeDef)
-  var RecList = newNimNode(nnkRecList)
-  for i in 1 .. call[1].len-1:
-    var typeOf = newNimNode(nnkTypeOfExpr).add(newNimNode(nnkPar))
-    typeOf[0].add(call[1][i])
-    case call[1][i].kind
-    of nnkIdent:
-      RecList.add newIdentDefs(call[1][i], typeOf)
-    of nnkLiterals:
-      RecList.add newIdentDefs(newIdentNode("dummy" & $i), typeOf)
-    else: assert false
+  result = newNimNode(nnkStmtList)
   
-  result[0][0][2][0][2] = RecList
-  result.add parseExpr("var argsToPass: PArgObject")
+  result.add parseExpr("var argsToPass: P$#ArgObject" % [$call[1][0].ident])
   result.add parseExpr("new argsToPass")
   
   for i in 1 .. call[1].len-1:
     case call[1][i].kind
-    of nnkIdent:
-      result.add parseExpr("argsToPass.$1 = $1" % [$call[1][i].ident])
-    of nnkLiterals:
+    of nnkLiterals, nnkIdent:
       let dotExpr = newDotExpr(newIdentNode("argsToPass"),
                                newIdentNode("dummy" & $i))
       result.add newAssignment(dotExpr, call[1][i])
@@ -904,8 +912,13 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   if $n[0].ident != "await": error "'await' expected"
   result = @[]
   let callIdent = $n[1][0].ident
-  case callIdent
-  of "send": error("TODO")
+  case callIdent.normalize
+  of "send":
+    let socketName = $n[1][1].ident
+    let toWrite    = n[1][2]
+    result.add createRequestNode("sendReq",
+                    "socket: $#, kind: reqWrite, toWrite: $#" %
+                    [socketName, $(toWrite.toStrLit)])
   else:
     result.add(transformCallWithArg(n))
     # reqRegister
@@ -945,29 +958,53 @@ proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
     else:
       result.add(son)
 
-proc transformArgs(formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
+proc transformArgs(procName: string,
+                   formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
   ## Transforms formal params into a typedef with a dummy type
-  ## ``ref object of TObject``. The PRequest.param is then casted to it,
-  ## and immutable vars are defined as specified the proc's params.
+  ## ``ref object of TObject``. This is inserted above the proc definition.
   expectKind(formalParams, nnkFormalParams)
-  result = parseStmt(typeDef)
+  result = parseStmt(typeDef % procName)
   
   var RecList = newNimNode(nnkRecList)
   
   for i in 1 .. formalParams.len-1:
     expectKind(formalParams[i], nnkIdentDefs)
-    RecList.add(formalParams[i])
+    RecList.add(newIdentDefs(newIdentNode("dummy" & $i), formalParams[i][1]))
+    # TODO: Add comment with the original param name?
   
   result[0][0][2][0][2] = RecList
 
-  result.add(parseExpr("let passedInParams = cast[PArgObject](x.param)"))
+proc declareArgsInBody(procName: string,
+                       formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
+  ## Creates a local immutable var by casting the PRequest.param.
+  ## Immutable vars are then defined as specified in the proc's params.
+  result = newNimNode(nnkStmtList)
+  result.add(parseExpr("let passedInParams = P$#ArgObject(x.param)" % procName))
+  # Fields take the form ``dummy<i>``.
   for i in 1 .. formalParams.len-1:
     expectKind(formalParams[i], nnkIdentDefs)
-    result.add(parseExpr("let $1: $2 = passedInParams.$1" % 
-                    [$formalParams[i][0].ident, $formalParams[i][1].ident]))
+    result.add(parseExpr("let $1: $2 = passedInParams.$3" % 
+                    [$formalParams[i][0].ident, $formalParams[i][1].ident,
+                     "dummy" & $i]))
+
+proc isDocumentation(n: PNimrodNode): bool {.compiletime.} =
+  ## Determines whether this proc def is a docs stub.
+  result = true
+  for i in 0 .. n[6].len-1:
+    if n[6][i].kind != nnkCommentStmt:
+      return false
 
 macro async*(n: stmt): stmt {.immediate.} =
   expectKind(n, nnkProcDef)
+  #echo(treeRepr(n))
+  if n.isDocumentation():
+    # Documentation stub?
+    # TODO: Give it an async tag?
+    # TODO: Doc strings are not generated in doc2
+    result = n
+    result[6] = parseStmt("nil")
+    return
+  
   #echo("-------------")
   result = newNimNode(nnkIteratorDef)
   for i in 0 .. n.len-1:
@@ -989,20 +1026,34 @@ macro async*(n: stmt): stmt {.immediate.} =
   
   result[6] = newNimNode(nnkStmtList)
   
-  # Transform any params passed to the proc into a typedef.
+  # Declare variables based on the params that the async proc takes.
   if n[3].len > 1:
-    let transfArgs = transformArgs(n[3])
+    let args = declareArgsInBody($n[0].ident, n[3])
     
-    result[6].add(transfArgs)
+    result[6].add(args)
   
   # Body
   var body = transform(n[6])
   result[6].add(body)
   
+  # Add typedef above the proc def for parameters.
+  if n[3].len > 1:
+    let procDef = copyNimTree(result)
+    result = newNimNode(nnkStmtList)
+    result.add(transformArgs($n[0].ident, n[3]))
+    result.add procDef
+  
   #echo treeRepr(result)
   echo result.toStrLit().strVal
 
 # ---- Async macro end
+
+proc send*(socket: PAsyncSocket, text: string) {.async.} =
+  ## Sends ``text`` to ``socket`` asynchronously.
+
+proc accept*(socket: PAsyncSocket): PAsyncSocket {.async.} =
+  ## Accepts a client connecting to a server socket asynchronously.
+  ## Returns that client.
 
 when isMainModule:
 

@@ -2,7 +2,11 @@ import sockets, asyncio, strutils
 proc processRequest(client: PAsyncSocket, test: string) {.async.} =
   assert test == "ahha"
   assert client != nil
-  echo(test)
+  echo("Test = ", test)
+  let line = await(readLine(client))
+  echo("Read: ", line)
+  
+  await send(client, "Goodbye.\c\L")
   client.close()
 
 proc processServer() {.async.} =
