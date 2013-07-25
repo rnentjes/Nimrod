@@ -839,22 +839,27 @@ proc len*(disp: PDispatcher): int =
 # ---- Async macro
 
 proc createRequestNode(varName,
-                       reqArgs: string): PNimrodNode {.compiletime.} =
+           reqArgs: string, sym: var PNimrodNode): PNimrodNode {.compiletime.} =
   result = newNimNode(nnkStmtList)
-  var reqObj = parseExpr(
-        """var $# = PRequest($#)""" %
-        [varName, reqArgs])
+  sym = genSym(nskVar, varName)
+  var reqObj = newVarStmt(sym,
+                  parseExpr("PRequest($#)" % [reqArgs]))
+  
   result.add reqObj
-  result.add parseExpr("yield $#" % [varName])
+  result.add newNimNode(nnkYieldStmt).add(sym)
   # Check for exception
-  result.add parseStmt("if $1.hasException: raise $1.exc" % [varName])
+  result.add newIfStmt(
+               (newDotExpr(sym, newIdentNode("hasException")),
+                newNimNode(nnkRaiseStmt).add(
+                  newDotExpr(sym, newIdentNode("exc")))))  
+  echo treeRepr(result)
 
 proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   ## Transforms a var/let section
   ## E.g:
   ##  let client = await(accept(server))
   result = @[]
-  let nameIdent = n[0][0].ident # Var name
+  let nameIdent = n[0][0] # Var name
   expectLen(n[0], 3) # IdentDefs
   let insideAwait = n[0][2][1]
   let reqCall = $insideAwait[0].ident
@@ -864,25 +869,26 @@ proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   case reqCall.normalize
   of "accept":
     let acceptReqVar = "acceptReq"
-    # TODO: Random var names which do not conflict. or wait for gensym?
+    var sym: PNimrodNode
     result.add createRequestNode(acceptReqVar,
-                 "socket: $#, kind: reqAccept, client: nil" % sockName)
+        "socket: $#, kind: reqAccept, client: nil" % sockName, sym)
+  
     case n.kind
     of nnkLetSection:
-      result.add parseExpr("let $# = $#.client" % [$nameIdent, acceptReqVar])
+      result.add newLetStmt(nameIdent, newDotExpr(sym, newIdentNode("client")))
     of nnkVarSection:
-      result.add parseExpr("var $# = $#.client" % [$nameIdent, acceptReqVar])
+      result.add newVarStmt(nameIdent, newDotExpr(sym, newIdentNode("client")))
     else: error "Bad node kind in toYieldVar"
   of "readline":
     let readReqVar = "readLineReq"
-    # TODO: Random var names which do not conflict. or wait for gensym?
+    var sym: PNimrodNode
     result.add createRequestNode(readReqVar,
-                 "socket: $#, kind: reqReadLine, line: \"\"" % sockName)
+        "socket: $#, kind: reqReadLine, line: \"\"" % sockName, sym)
     case n.kind
     of nnkLetSection:
-      result.add parseExpr("let $# = $#.line" % [$nameIdent, readReqVar])
+      result.add newLetStmt(nameIdent, newDotExpr(sym, newIdentNode("line")))
     of nnkVarSection:
-      result.add parseExpr("var $# = $#.line" % [$nameIdent, readReqVar])
+      result.add newVarStmt(nameIdent, newDotExpr(sym, newIdentNode("line")))
     else: error "Bad node kind in toYieldVar"
   else:
     error(reqCall & " is not a valid async call")
@@ -924,9 +930,10 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   of "send":
     let socketName = $n[1][1].ident
     let toWrite    = n[1][2]
+    var sym: PNimrodNode
     result.add createRequestNode("sendReq",
-                    "socket: $#, kind: reqWrite, toWrite: $#" %
-                    [socketName, $(toWrite.toStrLit)])
+        "socket: $#, kind: reqWrite, toWrite: $#" %
+            [socketName, $(toWrite.toStrLit)], sym)
   else:
     result.add(transformCallWithArg(n))
     # reqRegister
@@ -987,13 +994,13 @@ proc declareArgsInBody(procName: string,
   ## Creates a local immutable var by casting the PRequest.param.
   ## Immutable vars are then defined as specified in the proc's params.
   result = newNimNode(nnkStmtList)
-  result.add(parseExpr("let passedInParams = P$#ArgObject(x.param)" % procName))
+  var sym = genSym(ident = "passedInParams")
+  result.add newLetStmt(sym, parseExpr("P$#ArgObject(x.param)" % procName))
   # Fields take the form ``dummy<i>``.
   for i in 1 .. formalParams.len-1:
     expectKind(formalParams[i], nnkIdentDefs)
-    result.add(parseExpr("let $1: $2 = passedInParams.$3" % 
-                    [$formalParams[i][0].ident, $formalParams[i][1].ident,
-                     "dummy" & $i]))
+    result.add newLetStmt(formalParams[i][0],
+                  newDotExpr(sym, newIdentNode("dummy" & $i)))
 
 proc isDocumentation(n: PNimrodNode): bool {.compiletime.} =
   ## Determines whether this proc def is a docs stub.

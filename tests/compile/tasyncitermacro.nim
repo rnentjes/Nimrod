@@ -8,6 +8,8 @@ proc processRequest(client: PAsyncSocket, test: string) {.async.} =
   echo("Read: ", line)
   
   await send(client, "Goodbye.\c\L")
+  await send(client, "Goodbye.\c\L")
+  await send(client, "Goodbye.\c\L")
   client.close()
 
 proc processServer() {.async.} =
