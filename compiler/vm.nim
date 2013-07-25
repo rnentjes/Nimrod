@@ -79,7 +79,9 @@ template decodeBx(k: expr) {.immediate, dirty.} =
   let rbx = instr.regBx - wordExcess
   ensureKind(k)
 
-proc compile(c: PCtx, s: PSym): int = vmgen.genProc(c, s)
+proc compile(c: PCtx, s: PSym): int = 
+  result = vmgen.genProc(c, s)
+  c.echoCode
 
 proc myreset(n: PNode) =
   when defined(system.reset): 
@@ -197,14 +199,10 @@ proc execute(c: PCtx, start: int) =
     of opcYldYoid: assert false
     of opcYldVal: assert false
     of opcAsgnInt:
-      echo ra, " ", instr.regB, " ", regs.len, tos.prc.name.s
       decodeB(nkIntLit)
       regs[ra].intVal = regs[rb].intVal
     of opcAsgnStr:
       decodeB(nkStrLit)
-      debug regs[rb]
-      echo rb
-      Message(c.debug[pc], warnUser, " here")
       regs[ra].strVal = regs[rb].strVal
     of opcAsgnFloat:
       decodeB(nkFloatLit)
