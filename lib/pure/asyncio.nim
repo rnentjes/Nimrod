@@ -757,7 +757,7 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
     processWorkers(d)
     var readWorkers = populateRead(d)
     var writeWorkers = populateWrite(d)
-    echo(readWorkers.len, " ", d.requests[reqNil].len, d.requests[reqReadLine].len)
+    #echo(readWorkers.len, " ", d.requests[reqNil].len, d.requests[reqReadLine].len)
     if select(readWorkers, writeWorkers, timeout) != 0:
       var newRequests: array[TRequestKind, seq[PWorker]] = newRequests()
       for req in TRequestKind:
@@ -827,7 +827,8 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
           of reqReg:
             assert false, "reqReg should have been processed already"
           of reqNil:
-            assert false, "reqNil should have been processed already"
+            # Nothing to do. Most likely that a new worker has just been
+            # registered.
           
           newRequests[addTo].add(worker)
       d.requests = newRequests
