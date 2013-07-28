@@ -840,6 +840,7 @@ proc len*(disp: PDispatcher): int =
 
 proc createRequestNode(varName,
            reqArgs: string, sym: var PNimrodNode): PNimrodNode {.compiletime.} =
+  ## Creates a constructor for a PRequest object, which will be then yielded.
   result = newNimNode(nnkStmtList)
   # TODO: Using gensym here causes segfaults because hasException is not
   # initialised.
@@ -905,33 +906,19 @@ const typeDef =
 
 proc transformCallWithArg(call: PNimrodNode,
                           sym: var PNimrodNode): PNimrodNode {.compiletime.} =
+  ## Transforms an async await call of a user-defined proc into a
+  ## ``reqReg`` yield.
   result = newNimNode(nnkStmtList)
   
   sym = gensym(nskVar, "argsToPass")
-  
-  # var argsToPass: P$#ArgObject
-  result.add newNimNode(nnkVarSection).add(
-    newNimNode(nnkIdentDefs).add(sym, 
-      newIdentNode("P$#ArgObject" % [$call[1][0].ident]),
-      newNimNode(nnkEmpty)))
-  
-  result.add newCall("new", sym)
-  
-  for i in 1 .. call[1].len-1:
-    case call[1][i].kind
-    of nnkLiterals, nnkIdent:
-      let dotExpr = newDotExpr(sym,
-                               newIdentNode("dummy" & $i))
-      result.add newAssignment(dotExpr, call[1][i])
-    else: assert false
 
   # Add in a call to a pre-generated proc stub so that the compiler verifies
   # the params for us :)
-  # TODO: Make sure this doesn't actually get called, maybe inline it?
+  # TODO: Inline this maybe?
   var args: seq[PNimrodNode] = @[]
   for i in 1 .. call[1].len-1:
     args.add(call[1][i])
-  result.add newCall(call[1][0], args)
+  result.add newVarStmt(sym, newCall(call[1][0], args))
 
 proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   ## Transforms a call/command
@@ -958,6 +945,11 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
     result.add yie
 
 proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
+  ## Transforms body.
+  ## Specifically it does the following:
+  ##
+  ##   * Looks for 'await' and transforms it into a yield.
+  ##   * Handles arguments correctly. 
   result = newNimNode(nnkStmtList)
   expectKind(n, nnkStmtList)
   for i in 0 .. n.len-1:
@@ -1029,10 +1021,22 @@ proc isDocumentation(n: PNimrodNode): bool {.compiletime.} =
 proc createVerificationProc(procName: PNimrodNode,
                     formalParams: PNimrodNode): PNimrodNode {.compiletime.} =
   # TODO: Export this stub if our async proc is exported?
-  var kids: seq[PNimrodNode] = @[]
-  for i in 0 .. formalParams.len-1:
-    kids.add(formalParams[i])
-  result = newProc(procName, kids)
+  # Generate list of parameters for the proc. First param is the return type.
+  var params: seq[PNimrodNode] = @[newIdentNode("P$#ArgObject" % $procName.ident)]
+  for i in 1 .. formalParams.len-1:
+    params.add(formalParams[i])
+  
+  # Generate body. We construct the ArgObject here, this is done so that
+  # default variables of the async proc can be captured.
+  var body = newNimNode(nnkStmtList)
+  body.add newCall("new", newIdentNode("result"))
+  
+  for i in 1 .. formalParams.len-1:
+    let dotExpr = newDotExpr(newIdentNode("result"),
+                             newIdentNode("dummy" & $i))
+    body.add newAssignment(dotExpr, formalParams[i][0])
+  
+  result = newProc(procName, params, body)
 
 macro async*(n: stmt): stmt {.immediate.} =
   expectKind(n, nnkProcDef)
@@ -1045,7 +1049,6 @@ macro async*(n: stmt): stmt {.immediate.} =
     result[6] = parseStmt("nil")
     return
   
-  #echo("-------------")
   result = newNimNode(nnkIteratorDef)
   for i in 0 .. n.len-1:
     result.add(copyNimTree(n[i]))
@@ -1061,18 +1064,20 @@ macro async*(n: stmt): stmt {.immediate.} =
   formalParams.add(params)
   result[3] = formalParams
   
-  # Pragma
+  # Closure pragma
   result[4].add(newIdentNode(!"closure"))
   
+  # Body
   result[6] = newNimNode(nnkStmtList)
   
   # Declare variables based on the params that the async proc takes.
+  # i.e. extract them from the PRequest object.
   if n[3].len > 1:
     let args = declareArgsInBody($n[0].ident, n[3])
     
     result[6].add(args)
   
-  # Body
+  # Transform body
   var body = transform(n[6])
   result[6].add(body)
   
@@ -1081,7 +1086,9 @@ macro async*(n: stmt): stmt {.immediate.} =
     let procDef = copyNimTree(result)
     result = newNimNode(nnkStmtList)
     result.add(transformArgs($n[0].ident, n[3]))
-    # Generate a proc stub to verify that the user passes the correct params.
+    # Generate a proc to verify that the user passes the correct params.
+    # The proc also constructs the ArgObject, this is so that default params
+    # can be captured into the ArgObject.
     result.add createVerificationProc(n[0], n[3])
     
     result.add procDef

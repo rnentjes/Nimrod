@@ -1,6 +1,6 @@
 import sockets, asyncio, strutils
 
-proc processRequest(client: PAsyncSocket, test: string, closeSock: bool) {.async.} =
+proc processRequest(client: PAsyncSocket, test: string, closeSock: bool = true) {.async.} =
   assert test == "ahha"
   assert client != nil
   echo("Test = ", test)
@@ -25,7 +25,7 @@ proc processServer() {.async.} =
     let client: PAsyncSocket = await(accept(sock))
     assert client != nil
     await processRequest(client, "ahha", false)
-    await processRequest(client, "ahha", true)
+    await processRequest(client, "ahha")
 
 var disp = newDispatcher(false)
 disp.register(processServer, nil)
