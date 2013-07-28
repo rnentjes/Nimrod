@@ -841,18 +841,22 @@ proc len*(disp: PDispatcher): int =
 proc createRequestNode(varName,
            reqArgs: string, sym: var PNimrodNode): PNimrodNode {.compiletime.} =
   result = newNimNode(nnkStmtList)
-  sym = genSym(nskVar, varName)
+  # TODO: Using gensym here causes segfaults because hasException is not
+  # initialised.
+  sym = newIdentNode(varName) #genSym(nskVar, varName)
   var reqObj = newVarStmt(sym,
                   parseExpr("PRequest($#)" % [reqArgs]))
   
   result.add reqObj
   result.add newNimNode(nnkYieldStmt).add(sym)
   # Check for exception
+  # TODO: Create a custom exception type, create a field which will store
+  # the original stack trace as given by getStackTrace. Maybe there is a way
+  # to override the stack trace? That'd be nice.
   result.add newIfStmt(
                (newDotExpr(sym, newIdentNode("hasException")),
                 newNimNode(nnkRaiseStmt).add(
-                  newDotExpr(sym, newIdentNode("exc")))))  
-  echo treeRepr(result)
+                  newDotExpr(sym, newIdentNode("exc")))))
 
 proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   ## Transforms a var/let section
@@ -871,7 +875,7 @@ proc toYieldVar(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
     let acceptReqVar = "acceptReq"
     var sym: PNimrodNode
     result.add createRequestNode(acceptReqVar,
-        "socket: $#, kind: reqAccept, client: nil" % sockName, sym)
+        "socket: $#, kind: reqAccept, client: nil, hasException: false" % sockName, sym)
   
     case n.kind
     of nnkLetSection:
@@ -899,16 +903,24 @@ const typeDef =
     P$#ArgObject = ref object of TObject
   """
 
-proc transformCallWithArg(call: PNimrodNode): PNimrodNode {.compiletime.} =
+proc transformCallWithArg(call: PNimrodNode,
+                          sym: var PNimrodNode): PNimrodNode {.compiletime.} =
   result = newNimNode(nnkStmtList)
   
-  result.add parseExpr("var argsToPass: P$#ArgObject" % [$call[1][0].ident])
-  result.add parseExpr("new argsToPass")
+  sym = gensym(nskVar, "argsToPass")
+  
+  # var argsToPass: P$#ArgObject
+  result.add newNimNode(nnkVarSection).add(
+    newNimNode(nnkIdentDefs).add(sym, 
+      newIdentNode("P$#ArgObject" % [$call[1][0].ident]),
+      newNimNode(nnkEmpty)))
+  
+  result.add newCall("new", sym)
   
   for i in 1 .. call[1].len-1:
     case call[1][i].kind
     of nnkLiterals, nnkIdent:
-      let dotExpr = newDotExpr(newIdentNode("argsToPass"),
+      let dotExpr = newDotExpr(sym,
                                newIdentNode("dummy" & $i))
       result.add newAssignment(dotExpr, call[1][i])
     else: assert false
@@ -919,7 +931,7 @@ proc transformCallWithArg(call: PNimrodNode): PNimrodNode {.compiletime.} =
   var args: seq[PNimrodNode] = @[]
   for i in 1 .. call[1].len-1:
     args.add(call[1][i])
-  result.add newCall(call[1][0], args) 
+  result.add newCall(call[1][0], args)
 
 proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   ## Transforms a call/command
@@ -935,10 +947,15 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
         "socket: $#, kind: reqWrite, toWrite: $#" %
             [socketName, $(toWrite.toStrLit)], sym)
   else:
-    result.add(transformCallWithArg(n))
+    var sym: PNimrodNode
+    result.add(transformCallWithArg(n, sym))
     # reqRegister
-    result.add parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#, param: argsToPass)" %
-                         [$n[1][1].ident, callIdent])
+    var yie = parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#)" %
+        [$n[1][1].ident, callIdent])
+    yie[0].add(newNimNode(nnkExprColonExpr).add(newIdentNode("param"),
+        sym))
+    
+    result.add yie
 
 proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
   result = newNimNode(nnkStmtList)
