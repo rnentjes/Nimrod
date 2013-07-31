@@ -1,7 +1,13 @@
 import sockets, asyncio, strutils
 
-proc auth(client: PAsyncSocket) {.async.} =
+proc auth3(client: PAsyncSocket) {.async.} =
   await send(client, "Auth\c\L")
+
+proc auth2(client: PAsyncSocket) {.async.} =
+  await auth3(client)
+
+proc auth(client: PAsyncSocket) {.async.} =
+  await auth2(client)
 
 proc processRequest(client: PAsyncSocket, test: string, closeSock: bool = true) {.async.} =
   assert test == "ahha"
@@ -11,7 +17,6 @@ proc processRequest(client: PAsyncSocket, test: string, closeSock: bool = true) 
   
   for i in 0 .. 10:
     await auth(client)
-    #await send(client, "Auth\c\L")
   
   await send(client, "Goodbye.\c\L")
   if closeSock:

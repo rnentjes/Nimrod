@@ -671,9 +671,7 @@ proc processWorkers(d: PDispatcher) =
   var newRequests: array[TRequestKind, seq[PWorker]] = d.requests
   newRequests[reqNil] = @[]
   
-  
-  
-  for idle in d.requests[reqNil]:
+  proc processWorker(idle: PWorker) =
     let req = idle.worker(idle.x)
     if req != nil:
       echo("Process workers, after exec: ", req.kind)
@@ -684,13 +682,16 @@ proc processWorkers(d: PDispatcher) =
                                 x: req)
         newRequests[reqNil].add(newWorker)
       of reqAwait:
-        # For efficiency lets execute this async proc now.
-        let awaitReq = req.worker(req)
-        let newWorker = PWorker(worker: req.worker, lastReq: awaitReq,
+        let newWorker = PWorker(worker: req.worker, lastReq: PRequest(kind: reqNil),
                                 x: req, hasParent: true, parent: idle)
         # The worker which ``await``-ed this user-defined async proc; 
         # will be re-added to ``d.requests`` when ``newWorker`` finishes.
-        newRequests[awaitReq.kind].add(newWorker)
+        
+        # We call this proc recursively so that the execution of this
+        # worker begins and we can immediately satisfy it's async request.
+        # We do not need to add newWorker to newRequests manually as it will be
+        # added by ``processWorker`` if necessary automatically.
+        processWorker(newWorker)
       else:
         idle.lastReq = req
         newRequests[req.kind].add(idle)
@@ -698,9 +699,13 @@ proc processWorkers(d: PDispatcher) =
       assert idle.worker.finished
       if idle.hasParent:
         # Re-add the parent worker, which is the worker which awaited this
-        # user-defined async proc which just finished.
-        newRequests[reqNil].add(idle.parent)
+        # user-defined async proc which just finished. Do this by calling
+        # processWorker recursively. Same way as above.
+        processWorker(idle.parent)
         echo("Await finish: ", idle.parent.lastReq.kind)
+  
+  for idle in d.requests[reqNil]:
+    processWorker(idle)
   
   d.requests = newRequests
 
