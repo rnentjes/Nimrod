@@ -133,7 +133,9 @@ type
     SockUDPBound
 
   TRequestKind* = enum
-    reqNil, reqReg, reqRead, reqWrite, reqReadLine, reqAccept, reqConnect
+    reqNil, reqReg, reqAwait, reqRead, reqWrite, reqReadLine, reqAccept, reqConnect
+  
+  PAsyncProc = iterator (x: PRequest): PRequest
   
   PRequest* = ref object
     socket*: PAsyncSocket
@@ -144,9 +146,9 @@ type
     case kind*: TRequestKind
     of reqNil:
       nil
-    of reqReg:
+    of reqReg, reqAwait:
       param*: PObject
-      worker*: iterator (x: PRequest): PRequest
+      worker*: PAsyncProc
     of reqRead:
       count*: int            ## Request
       readData*: string      ## Response
@@ -161,9 +163,13 @@ type
       address*: string       ## Request
       
   PWorker* = ref object
-    worker: iterator (x: PRequest): PRequest {.closure.}
-    x: PRequest
-    lastReq: PRequest
+    worker*: PAsyncProc
+    x*: PRequest
+    lastReq*: PRequest
+    case hasParent*: bool
+    of true:
+      parent*: PWorker
+    else: nil
 
   PDispatcher* = ref TDispatcher
   TDispatcher = object
@@ -615,12 +621,15 @@ proc createFdSet(fd: var TFdSet, s: seq[PWorker], m: var int) =
   for i in items(s): 
     m = max(m, int(i.lastReq.socket.getFD))
     FD_SET(i.lastReq.socket.getFD, fd)
-   
+
+proc getWorkerSocket(worker: PWorker): PAsyncSocket =
+  worker.lastReq.socket
+
 proc pruneSocketSet(s: var seq[PWorker], fd: var TFdSet) =
   var i = 0
   var L = s.len
   while i < L:
-    if FD_ISSET(s[i].lastReq.socket.getFD, fd) != 0'i32:
+    if FD_ISSET(getWorkerSocket(s[i]).getFD, fd) != 0'i32:
       s[i] = s[L-1]
       dec(L)
     else:
@@ -661,19 +670,38 @@ proc register*(disp: PDispatcher, worker: iterator (x: PRequest): PRequest,
 proc processWorkers(d: PDispatcher) =
   var newRequests: array[TRequestKind, seq[PWorker]] = d.requests
   newRequests[reqNil] = @[]
+  
+  
+  
   for idle in d.requests[reqNil]:
     let req = idle.worker(idle.x)
     if req != nil:
-      if req.kind == reqReg:
+      echo("Process workers, after exec: ", req.kind)
+      case req.kind
+      of reqReg:
         newRequests[reqNil].add(idle)
         let newWorker = PWorker(worker: req.worker, lastReq: PRequest(kind: reqNil),
                                 x: req)
         newRequests[reqNil].add(newWorker)
+      of reqAwait:
+        # For efficiency lets execute this async proc now.
+        let awaitReq = req.worker(req)
+        let newWorker = PWorker(worker: req.worker, lastReq: awaitReq,
+                                x: req, hasParent: true, parent: idle)
+        # The worker which ``await``-ed this user-defined async proc; 
+        # will be re-added to ``d.requests`` when ``newWorker`` finishes.
+        newRequests[awaitReq.kind].add(newWorker)
       else:
         idle.lastReq = req
         newRequests[req.kind].add(idle)
     else:
       assert idle.worker.finished
+      if idle.hasParent:
+        # Re-add the parent worker, which is the worker which awaited this
+        # user-defined async proc which just finished.
+        newRequests[reqNil].add(idle.parent)
+        echo("Await finish: ", idle.parent.lastReq.kind)
+  
   d.requests = newRequests
 
 template popu(req) {.immediate, dirty.} =
@@ -683,6 +711,7 @@ template popu(req) {.immediate, dirty.} =
 proc populateRead(d: PDispatcher): seq[PWorker] =
   result = @[]
 
+  # TODO: Just add the seq[]
   popu(reqRead)
   popu(reqReadLine)
   popu(reqAccept)
@@ -690,6 +719,79 @@ proc populateRead(d: PDispatcher): seq[PWorker] =
 proc populateWrite(d: PDispatcher): seq[PWorker] =
   result = @[]
   popu(reqWrite)
+
+proc processRequests(requests, readWorkers, writeWorkers: seq[PWorker],
+                     newRequests: var array[TRequestKind, seq[PWorker]]) =
+  for worker in requests:
+    echo("Process requests: ", worker.lastReq.kind)
+    var addTo = worker.lastReq.kind
+    template execReq(workers: var seq[PWorker], autoadd: bool,
+                     body: stmt) {.immediate, dirty.} = 
+      if worker notin workers:
+        # Worker is ready to read. Let's read.
+        try:
+          body
+        except:
+          worker.lastReq.hasException = true
+          worker.lastReq.exc = getCurrentException()
+        finally:
+          if autoAdd:
+            addTo = reqNil
+    
+    case worker.lastReq.kind
+    of reqReadLine:
+      execReq readWorkers, false:
+        if worker.lastReq.socket.readLine(worker.lastReq.line):
+          addTo = reqNil
+    of reqAccept:
+      execReq readWorkers, true:
+        worker.lastReq.client = newAsyncSocket()
+        worker.lastReq.socket.accept(worker.lastReq.client)
+    of reqRead:
+      # We guarantee that all requested data will be read.
+      execReq readWorkers, false:
+        proc doRead(count: int) =
+          let got = worker.lastReq.socket.recvAsync(
+                        worker.lastReq.readData, count)
+          assert got != -1
+          if got == count:
+            addTo = reqNil # Everything has been read
+        if worker.lastReq.readData.len == 0:
+          doRead(worker.lastReq.count)
+        else:
+          doRead(worker.lastReq.count-worker.lastReq.readData.len)
+
+    of reqWrite:
+      # We guarantee that all the data that is requested to be sent, will
+      # be sent.
+
+      execReq writeWorkers, false:
+        let written = worker.lastReq.written
+        proc doSend(toWrite: string) =
+          let len = toWrite.len
+          let sent = worker.lastReq.socket.sendAsync(toWrite)
+          assert sent != 0 # /Something/ should have been written.
+          if sent == len:
+            # Sent all data, request complete.
+            addTo = reqNil
+          else:
+            # Didn't send all data, must send the rest later.
+            worker.lastReq.written.inc(sent)
+        
+        if written == 0:
+          doSend(worker.lastReq.toWrite)
+        else:
+          let toWrite = worker.lastReq.toWrite[written .. -1]
+          doSend(toWrite)
+    of reqConnect:
+      #execReq 
+    of reqReg, reqAwait:
+      assert false, $worker.lastReq.kind & " should have been processed already"
+    of reqNil:
+      # Nothing to do. Most likely that a new worker has just been
+      # registered.
+    
+    newRequests[addTo].add(worker)
 
 proc poll*(d: PDispatcher, timeout: int = 500): bool =
   ## This function checks for events on all the delegates in the `PDispatcher`.
@@ -761,76 +863,7 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
     if select(readWorkers, writeWorkers, timeout) != 0:
       var newRequests: array[TRequestKind, seq[PWorker]] = newRequests()
       for req in TRequestKind:
-        for worker in d.requests[req]:
-          echo(req)
-          var addTo = req
-          template execReq(workers: var seq[PWorker], autoadd: bool,
-                           body: stmt) {.immediate, dirty.} = 
-            if worker notin workers:
-              # Worker is ready to read. Let's read.
-              try:
-                body
-              except:
-                worker.lastReq.hasException = true
-                worker.lastReq.exc = getCurrentException()
-              finally:
-                if autoAdd:
-                  addTo = reqNil
-          
-          case req
-          of reqReadLine:
-            execReq readWorkers, false:
-              if worker.lastReq.socket.readLine(worker.lastReq.line):
-                addTo = reqNil
-          of reqAccept:
-            execReq readWorkers, true:
-              worker.lastReq.client = newAsyncSocket()
-              worker.lastReq.socket.accept(worker.lastReq.client)
-          of reqRead:
-            # We guarantee that all requested data will be read.
-            execReq readWorkers, false:
-              proc doRead(count: int) =
-                let got = worker.lastReq.socket.recvAsync(
-                              worker.lastReq.readData, count)
-                assert got != -1
-                if got == count:
-                  addTo = reqNil # Everything has been read
-              if worker.lastReq.readData.len == 0:
-                doRead(worker.lastReq.count)
-              else:
-                doRead(worker.lastReq.count-worker.lastReq.readData.len)
-
-          of reqWrite:
-            # We guarantee that all the data that is requested to be sent, will
-            # be sent.
-
-            execReq writeWorkers, false:
-              let written = worker.lastReq.written
-              proc doSend(toWrite: string) =
-                let len = toWrite.len
-                let sent = worker.lastReq.socket.sendAsync(toWrite)
-                assert sent != 0 # /Something/ should have been written.
-                if sent == len:
-                  # Sent all data, request complete.
-                  addTo = reqNil
-                else:
-                  # Didn't send all data, must send the rest later.
-                  worker.lastReq.written.inc(sent)
-              
-              if written == 0:
-                doSend(worker.lastReq.toWrite)
-              else:
-                let toWrite = worker.lastReq.toWrite[written .. -1]
-                doSend(toWrite)
-          of reqConnect:
-            #execReq 
-          of reqReg:
-            assert false, "reqReg should have been processed already"
-          of reqNil:
-            # Nothing to do. Most likely that a new worker has just been
-            # registered.
-          
-          newRequests[addTo].add(worker)
+        processRequests(d.requests[req], readWorkers, writeWorkers, newRequests)
       d.requests = newRequests
 
 proc len*(disp: PDispatcher): int =
@@ -937,13 +970,28 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
   else:
     var sym: PNimrodNode
     result.add(transformCallWithArg(n, sym))
-    # reqRegister
-    var yie = parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#)" %
+    # reqCustom
+    var yie = parseExpr("yield PRequest(socket: $#, kind: reqAwait, worker: $#)" %
         [$n[1][1].ident, callIdent])
     yie[0].add(newNimNode(nnkExprColonExpr).add(newIdentNode("param"),
         sym))
     
     result.add yie
+
+proc toYieldReg(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
+  ## Transforms the 'reg' command to a reqReg yield request.
+  if $n[0].ident != "reg": error "'reg' expected"
+  result = @[]
+  let callIdent = $n[1][0].ident
+  var sym: PNimrodNode
+  result.add(transformCallWithArg(n, sym))
+  # reqRegister
+  var yie = parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#)" %
+      [$n[1][1].ident, callIdent])
+  yie[0].add(newNimNode(nnkExprColonExpr).add(newIdentNode("param"),
+      sym))
+  
+  result.add yie
 
 proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
   ## Transforms body.
@@ -975,9 +1023,18 @@ proc transform(n: PNimrodNode): PNimrodNode {.compiletime.} =
     of nnkWhileStmt:
       son[1] = transform(son[1])
       result.add(son)
+    of nnkForStmt:
+      son[2] = transform(son[2])
+      result.add(son)
     of nnkCall, nnkCommand:
-      if son[0].kind == nnkIdent and $son[0].ident == "await":
-        result.add toYieldCall(son)
+      if son[0].kind == nnkIdent:
+        case $son[0].ident
+        of "await":
+          result.add toYieldCall(son)
+        of "reg":
+          result.add toYieldReg(son)
+        else:
+          result.add son
       else:
         result.add son
     else:
