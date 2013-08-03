@@ -161,6 +161,7 @@ type
       client*: PAsyncSocket  ## Response
     of reqConnect:
       address*: string       ## Request
+      port*: TPort           ## Request
       
   PWorker* = ref object
     worker*: PAsyncProc
@@ -674,9 +675,15 @@ proc processWorkers(d: PDispatcher) =
   proc processWorker(idle: PWorker) =
     let req = idle.worker(idle.x)
     if req != nil:
-      echo("Process workers, after exec: ", req.kind)
       case req.kind
       of reqReg:
+        # Reset the lastReq. This caused odd issues in an 'accept' loop.
+        # My guess is that the request object got corrupted somehow, but
+        # I could not determine the cause. The issue that occurred was that
+        # 'await accept' simply stopped working after 6 clients (when connecting
+        # 10 simultaneously as seen in the tasyncitermacro test).
+        idle.lastReq = PRequest(kind: reqNil)
+        
         newRequests[reqNil].add(idle)
         let newWorker = PWorker(worker: req.worker, lastReq: PRequest(kind: reqNil),
                                 x: req)
@@ -702,33 +709,28 @@ proc processWorkers(d: PDispatcher) =
         # user-defined async proc which just finished. Do this by calling
         # processWorker recursively. Same way as above.
         processWorker(idle.parent)
-        echo("Await finish: ", idle.parent.lastReq.kind)
   
   for idle in d.requests[reqNil]:
     processWorker(idle)
   
   d.requests = newRequests
 
-template popu(req) {.immediate, dirty.} =
-  for i in d.requests[req]:
-    result.add(i)
-
 proc populateRead(d: PDispatcher): seq[PWorker] =
   result = @[]
 
-  # TODO: Just add the seq[]
-  popu(reqRead)
-  popu(reqReadLine)
-  popu(reqAccept)
+  result.add d.requests[reqAccept]
+  result.add d.requests[reqRead]
+  result.add d.requests[reqReadLine]
 
 proc populateWrite(d: PDispatcher): seq[PWorker] =
   result = @[]
-  popu(reqWrite)
+  result.add d.requests[reqWrite]
+  result.add d.requests[reqConnect]
 
 proc processRequests(requests, readWorkers, writeWorkers: seq[PWorker],
                      newRequests: var array[TRequestKind, seq[PWorker]]) =
   for worker in requests:
-    echo("Process requests: ", worker.lastReq.kind)
+    #echo(worker.lastReq.kind)
     var addTo = worker.lastReq.kind
     template execReq(workers: var seq[PWorker], autoadd: bool,
                      body: stmt) {.immediate, dirty.} = 
@@ -789,7 +791,11 @@ proc processRequests(requests, readWorkers, writeWorkers: seq[PWorker],
           let toWrite = worker.lastReq.toWrite[written .. -1]
           doSend(toWrite)
     of reqConnect:
-      #execReq 
+      if not worker.lastReq.socket.isConnecting:
+        worker.lastReq.socket.connect(worker.lastReq.address, worker.lastReq.port)
+      else:
+        execReq writeWorkers, true:
+          worker.lastReq.socket.info = SockConnected
     of reqReg, reqAwait:
       assert false, $worker.lastReq.kind & " should have been processed already"
     of reqNil:
@@ -864,8 +870,24 @@ proc poll*(d: PDispatcher, timeout: int = 500): bool =
     processWorkers(d)
     var readWorkers = populateRead(d)
     var writeWorkers = populateWrite(d)
-    #echo(readWorkers.len, " ", d.requests[reqNil].len, d.requests[reqReadLine].len)
-    if select(readWorkers, writeWorkers, timeout) != 0:
+    #echo("ReadWorkers: ", readWorkers.len, " | WriteWorkers: ", writeWorkers.len,
+    #     " | Idle Workers: ", d.requests[reqNil].len,
+    #     " | Workers waiting for readLine: ", d.requests[reqReadLine].len,
+    #     " | Workers waiting for accept: ", d.requests[reqAccept].len)
+    
+    # Check buffer state.
+    var isDataBuffered = false
+    var newReadWorkers: seq[PWorker] = @[]
+    for i in readWorkers:
+      if not i.lastReq.socket.hasDataBuffered(): newReadWorkers.add(i)
+      else: isDataBuffered = true
+    readWorkers = newReadWorkers
+    
+    #echo(if isDataBuffered: "Buffered" else: "Not Buffered")
+    
+    var doProcess = isDataBuffered
+    if not doProcess: doProcess = select(readWorkers, writeWorkers, timeout) != 0
+    if doProcess:
       var newRequests: array[TRequestKind, seq[PWorker]] = newRequests()
       for req in TRequestKind:
         processRequests(d.requests[req], readWorkers, writeWorkers, newRequests)
@@ -972,12 +994,20 @@ proc toYieldCall(n: PNimrodNode): seq[PNimrodNode] {.compileTime.} =
     result.add createRequestNode("sendReq",
         "socket: $#, kind: reqWrite, toWrite: $#" %
             [socketName, $(toWrite.toStrLit)], sym)
+  of "connect":
+    let socketName = $n[1][1].ident
+    let address    = n[1][2]
+    let port       = n[1][3]
+    var sym: PNimrodNode
+    result.add createRequestNode("connectReq",
+        "socket: $#, kind: reqConnect, address: $#, port: $#" %
+            [socketName, $(address.toStrLit), $(port.toStrLit)], sym)
   else:
     var sym: PNimrodNode
     result.add(transformCallWithArg(n, sym))
     # reqCustom
-    var yie = parseExpr("yield PRequest(socket: $#, kind: reqAwait, worker: $#)" %
-        [$n[1][1].ident, callIdent])
+    var yie = parseExpr("yield PRequest(socket: nil, kind: reqAwait, worker: $#)" %
+        [callIdent])
     yie[0].add(newNimNode(nnkExprColonExpr).add(newIdentNode("param"),
         sym))
     
@@ -991,8 +1021,8 @@ proc toYieldReg(n: PNimrodNode): seq[PNimrodNode] {.compiletime.} =
   var sym: PNimrodNode
   result.add(transformCallWithArg(n, sym))
   # reqRegister
-  var yie = parseExpr("yield PRequest(socket: $#, kind: reqReg, worker: $#)" %
-      [$n[1][1].ident, callIdent])
+  var yie = parseExpr("yield PRequest(socket: nil, kind: reqReg, worker: $#)" %
+      [callIdent])
   yie[0].add(newNimNode(nnkExprColonExpr).add(newIdentNode("param"),
       sym))
   
@@ -1092,7 +1122,10 @@ proc createVerificationProc(procName: PNimrodNode,
   # Generate body. We construct the ArgObject here, this is done so that
   # default variables of the async proc can be captured.
   var body = newNimNode(nnkStmtList)
-  body.add newCall("new", newIdentNode("result"))
+  if formalParams.len > 1:
+    body.add newCall("new", newIdentNode("result"))
+  else:
+    body.add parseExpr("nil")
   
   for i in 1 .. formalParams.len-1:
     let dotExpr = newDotExpr(newIdentNode("result"),
@@ -1145,16 +1178,15 @@ macro async*(n: stmt): stmt {.immediate.} =
   result[6].add(body)
   
   # Add typedef above the proc def for parameters.
-  if n[3].len > 1:
-    let procDef = copyNimTree(result)
-    result = newNimNode(nnkStmtList)
-    result.add(transformArgs($n[0].ident, n[3]))
-    # Generate a proc to verify that the user passes the correct params.
-    # The proc also constructs the ArgObject, this is so that default params
-    # can be captured into the ArgObject.
-    result.add createVerificationProc(n[0], n[3])
-    
-    result.add procDef
+  let procDef = copyNimTree(result)
+  result = newNimNode(nnkStmtList)
+  result.add(transformArgs($n[0].ident, n[3]))
+  # Generate a proc to verify that the user passes the correct params.
+  # The proc also constructs the ArgObject, this is so that default params
+  # can be captured into the ArgObject.
+  result.add createVerificationProc(n[0], n[3])
+  
+  result.add procDef
   
   #echo treeRepr(result)
   echo result.toStrLit().strVal
