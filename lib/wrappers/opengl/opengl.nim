@@ -5874,7 +5874,7 @@ proc glGetActiveUniform*(programObj: GLhandle, index: GLuint,
                          typ: var GLenum, name: PGLChar){.stdcall, importc, ogl.}
 proc glGetAttachedShaders*(programObj: GLhandle, MaxCount: GLsizei, 
                            Count: var GLint, shaders: PGLuint){.stdcall, importc, ogl.}
-proc glGetAttribLocation*(programObj: GLhandle, char: PGLChar): glint{.stdcall, importc, ogl.}
+proc glGetAttribLocation*(programObj: GLhandle, char: PGLChar): GLUint{.stdcall, importc, ogl.}
 proc glGetProgramiv*(programObj: GLhandle, pname: GLenum, params: PGLInt){.
     stdcall, importc, ogl.}
 proc glGetProgramInfoLog*(programObj: GLHandle, maxLength: glsizei, 
